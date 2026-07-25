@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fixed High-Reliability Acoustic Modem</title>
+    <title>Hardened Acoustic Modem (Decoder Resets & VU Meter)</title>
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -13,16 +13,20 @@
         button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 220px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
         .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
         .cache-info { font-size: 11px; color: #ce9178; margin-top: 5px; }
         .key-box { background: #111; padding: 10px; border: 1px solid #555; border-radius: 4px; margin-bottom: 15px; }
+        
+        /* Индикатор громкости микрофона */
+        .vu-wrapper { width: 100%; background: #111; height: 10px; border-radius: 5px; margin-top: 8px; overflow: hidden; border: 1px solid #444; }
+        .vu-bar { height: 100%; width: 0%; background: #4ec9b0; transition: width 0.05s ease-out; }
     </style>
 </head>
 <body>
 
-    <h2>Надёжный Акустический Модем (Оптимальный Chunk + Быстрый ACK)</h2>
+    <h2>Защищенный Акустический Модем (Сброс декодера + VU-метр)</h2>
 
     <div class="key-box">
         <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
@@ -31,7 +35,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Передача данных с высокой надёжностью и мгновенным откликом!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Проверка устойчивости с перезапуском декодера GGWave!</textarea>
         <button id="sendBtn">▶ Отправить данные</button>
     </div>
 
@@ -39,6 +43,10 @@
         <h3>2. Устройство Б (Приёмник)</h3>
         <button id="listenBtn">🎙 Включить микрофон приёмника</button>
         <span id="listenStatus" class="status">Выключен</span>
+
+        <div class="vu-wrapper" title="Уровень звука с микрофона">
+            <div id="vuBar" class="vu-bar"></div>
+        </div>
 
         <div class="progress">
             Статус сессии: <span id="pktStatus">Ожидание пакетов...</span>
@@ -162,6 +170,16 @@
             if (context.state === 'suspended') context.resume();
         }
 
+        // Жесткая перезагрузка экземпляра декодера при зависаниях
+        function resetDecoderInstance() {
+            if (ggwave && instance) {
+                try {
+                    ggwave.free(instance);
+                } catch(e) {}
+                instance = ggwave.init(parameters);
+            }
+        }
+
         function emitAudioSignal(text, deadTimeMs = 300) {
             return new Promise((resolve) => {
                 initGGWave();
@@ -232,13 +250,12 @@
 
             if (!isListening) await startReceiver();
 
-            // Короткая пауза перед первой отправкой
+            // Перезагрузим инстанс декодера перед началом новой сессии
+            resetDecoderInstance();
             await sleep(200);
 
             const sessionSalt = getRandomHex(2); 
-            
-            // Оптимальный размер чанка: 20 символов гарантирует стабильную передачу по воздуху
-            const CHUNK_SIZE = 20; 
+            const CHUNK_SIZE = 18; // Компактный и безопасный размер чанка
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
             log(`[TX] Старт передачи (${totalPackets} пакет(ов))...`);
@@ -329,11 +346,26 @@
                     context.createScriptProcessor(bufferSize, 1, 1) : 
                     context.createJavaScriptNode(bufferSize, 1, 1);
 
+                const vuBar = document.getElementById('vuBar');
+
                 recorder.onaudioprocess = function (e) {
+                    var source = e.inputBuffer;
+                    var pcmData = source.getChannelData(0);
+
+                    // Считаем уровень громкости (RMS) для визуализатора
+                    let sum = 0;
+                    for (let i = 0; i < pcmData.length; i++) {
+                        sum += pcmData[i] * pcmData[i];
+                    }
+                    let rms = Math.sqrt(sum / pcmData.length);
+                    if (vuBar) {
+                        vuBar.style.width = Math.min(100, Math.floor(rms * 400)) + '%';
+                    }
+
+                    // Пропускаем декодирование, если идет наша же передача или дедтайм
                     if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-                    var source = e.inputBuffer;
-                    var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
+                    var res = ggwave.decode(instance, convertTypedArray(new Float32Array(pcmData), Int8Array));
 
                     if (res && res.length > 0) {
                         const rawStr = new TextDecoder("utf-8").decode(res);
@@ -356,7 +388,7 @@
         async function handleIncomingSignal(rawStr) {
             if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-            // 1. Проверка ACK (для передатчика)
+            // 1. Проверка ACK
             if (rawStr.includes("ACK:")) {
                 const parts = rawStr.split("ACK:");
                 pendingSignal = { type: `ACK:${parts[1].trim()}` };
@@ -376,7 +408,6 @@
 
                         document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(rawReceivedChunks).length} / ${pkt.t}`;
 
-                        // Мгновенный ACK отклик
                         await sleep(150);
                         await emitAudioSignal(`ACK:${pkt.i}`, 400);
 
