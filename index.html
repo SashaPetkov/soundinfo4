@@ -20,14 +20,14 @@
     <h2>OFDM + Reed-Solomon v5.0</h2>
 
     <div class="box">
-        <h3>1. Передатчик (TX)</h3>
+        <h3>1. Передатчик</h3>
         <textarea id="inputText" placeholder="Введите большой текст (до 1-2 КБ)...">Привет! Это пакетная передача через параллельные частоты с кодами Рида-Соломона!</textarea>
-        <button id="sendBtn">▶ Отправить через параллельные частоты</button>
+        <button id="sendBtn">Отправить</button>
     </div>
 
     <div class="box">
-        <h3>2. Приёмник (RX)</h3>
-        <button id="listenBtn">🎙 Включить приёмник</button>
+        <h3>2. Приёмник</h3>
+        <button id="listenBtn">Включить приёмник</button>
         <span id="listenStatus" class="status">Выключен</span>
 
         <div class="progress">
@@ -44,9 +44,6 @@
     </div>
 
     <script>
-        // ==========================================
-        // 1. МАТЕМАТИКА ПОЛЕЙ ГАЛУА GF(256) И РИДА-СОЛОМОНА
-        // ==========================================
         const GF_EXP = new Uint8Array(512);
         const GF_LOG = new Uint8Array(256);
 
@@ -123,9 +120,6 @@
             return { data: msg.slice(0, msg.length - RS_SYMS), ok: false };
         }
 
-        // ==========================================
-        // 2. НАСТРОЙКИ МОДЕМА И ПАРАЛЛЕЛЬНЫХ ЧАСТОТ (OFDM)
-        // ==========================================
         const CARRIERS = [900, 1150, 1400, 1650, 1900, 2150, 2400, 2650]; // 8 параллельных частотных каналов
         const FREQ_START = 650;
         const FREQ_END = 2950;
