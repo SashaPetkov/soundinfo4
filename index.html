@@ -1,0 +1,245 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Самодельный M-FSK Модем</title>
+    <style>
+        body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
+        textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; }
+        button { padding: 10px 15px; margin: 5px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; }
+        button:hover { background: #1177bb; }
+        .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 4px; background: #252526; }
+        #log { background: #111; padding: 10px; height: 150px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; }
+        .status { font-weight: bold; color: #ce9178; }
+    </style>
+</head>
+<body>
+
+    <h2>M-FSK 16 Аудио Модем (100% Native JS)</h2>
+
+    <div class="box">
+        <h3>1. Передатчик</h3>
+        <textarea id="inputText" placeholder="Введите текст для передачи...">Привет, M-FSK!</textarea>
+        <button id="sendBtn">▶ Сформировать и отправить звук</button>
+    </div>
+
+    <div class="box">
+        <h3>2. Приёмник</h3>
+        <button id="listenBtn">🎙 Включить микрофон</button>
+        <span id="listenStatus" class="status">Выключен</span>
+        <h4>Полученный текст:</h4>
+        <textarea id="outputText" readonly></textarea>
+    </div>
+
+    <div class="box">
+        <h4>Лог детектора частот:</h4>
+        <div id="log"></div>
+    </div>
+
+    <script>
+        // --- НАСТРОЙКИ МОДЕМА ---
+        const BASE_FREQ = 1200;   // Минимальная частота (Гц)
+        const STEP_FREQ = 100;    // Шаг между тонами (Гц)
+        const FREQ_START = 1000;  // Маркер начала кадра
+        const FREQ_END = 2800;    // Маркер конца кадра
+        
+        // 16 частот для данных (от 1200 до 2700 Гц)
+        const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ);
+
+        const TONE_DURATION = 0.06; // Длительность одного тона (60 мс)
+        const PAUSE_DURATION = 0.01; // Пауза между тонами (10 мс)
+
+        let audioCtx = null;
+        let isListening = false;
+
+        function getAudioContext() {
+            if (!audioCtx) {
+                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            return audioCtx;
+        }
+
+        function log(msg) {
+            const l = document.getElementById('log');
+            l.innerHTML += msg + '<br>';
+            l.scrollTop = l.scrollHeight;
+        }
+
+        // ==========================================
+        // 1. ПЕРЕДАТЧИК (TX)
+        // ==========================================
+        document.getElementById('sendBtn').onclick = async () => {
+            const ctx = getAudioContext();
+            const text = document.getElementById('inputText').value;
+            if (!text) return;
+
+            // Кодируем текст в массив байт (UTF-8)
+            const encoder = new TextEncoder();
+            const bytes = encoder.encode(text);
+
+            // Собираем последовательность частот
+            const sequence = [];
+
+            // Преамбула (Маркер начала)
+            sequence.push(FREQ_START, FREQ_START);
+
+            // Каждая байт разбивается на два 4-битных ниббла (high и low)
+            for (let b of bytes) {
+                const highNibble = (b >> 4) & 0x0F;
+                const lowNibble = b & 0x0F;
+
+                sequence.push(DATA_FREQS[highNibble]);
+                sequence.push(DATA_FREQS[lowNibble]);
+            }
+
+            // Маркер конца
+            sequence.push(FREQ_END, FREQ_END);
+
+            log(`[TX] Отправка ${bytes.length} байт (${sequence.length} тонов)...`);
+
+            // Воспроизведение
+            let startTime = ctx.currentTime + 0.1;
+
+            for (let freq of sequence) {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+
+                osc.frequency.setValueAtTime(freq, startTime);
+                osc.type = 'sine';
+
+                // Сглаживание краев сигнала против щелчков
+                gain.gain.setValueAtTime(0, startTime);
+                gain.gain.linearRampToValueAtTime(0.3, startTime + 0.005);
+                gain.gain.setValueAtTime(0.3, startTime + TONE_DURATION - 0.005);
+                gain.gain.linearRampToValueAtTime(0, startTime + TONE_DURATION);
+
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+
+                osc.start(startTime);
+                osc.stop(startTime + TONE_DURATION);
+
+                startTime += TONE_DURATION + PAUSE_DURATION;
+            }
+        };
+
+        // ==========================================
+        // 2. ПРИЁМНИК (RX)
+        // ==========================================
+        document.getElementById('listenBtn').onclick = async () => {
+            if (isListening) return;
+
+            const ctx = getAudioContext();
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                isListening = true;
+                document.getElementById('listenStatus').innerText = "Слушаю...";
+                document.getElementById('listenStatus').style.color = "#4ec9b0";
+
+                const source = ctx.createMediaStreamSource(stream);
+                const analyser = ctx.createAnalyser();
+                analyser.fftSize = 2048; // Точность анализа частоты
+                analyser.smoothingTimeConstant = 0.2; // Быстрый отклик
+                source.connect(analyser);
+
+                const bufferLength = analyser.frequencyBinCount;
+                const dataArray = new Float32Array(bufferLength);
+
+                let rxBuffer = [];
+                let receiving = false;
+                let lastDetectedNibble = -1;
+                let sameNibbleCount = 0;
+
+                function processAudio() {
+                    if (!isListening) return;
+
+                    analyser.getFloatFrequencyData(dataArray);
+
+                    // Поиск доминирующей частоты в спектре
+                    let maxDb = -Infinity;
+                    let maxIndex = -1;
+
+                    for (let i = 0; i < bufferLength; i++) {
+                        if (dataArray[i] > maxDb) {
+                            maxDb = dataArray[i];
+                            maxIndex = i;
+                        }
+                    }
+
+                    // Перевод индекса FFT в Гц
+                    const detectedFreq = maxIndex * (ctx.sampleRate / analyser.fftSize);
+
+                    // Проверяем, достаточно ли громкий сигнал (выше уровня шума)
+                    if (maxDb > -65) { 
+                        
+                        // Детекция СТАРТА
+                        if (!receiving && Math.abs(detectedFreq - FREQ_START) < 40) {
+                            receiving = true;
+                            rxBuffer = [];
+                            log("[RX] Обнаружен старт передачи!");
+                        }
+
+                        // Детекция СТОПА
+                        else if (receiving && Math.abs(detectedFreq - FREQ_END) < 40) {
+                            receiving = false;
+                            log("[RX] Конец передачи.");
+                            decodeBuffer(rxBuffer);
+                        }
+
+                        // Детекция ДАННЫХ
+                        else if (receiving) {
+                            // Ищем ближайшую из 16 частот
+                            for (let i = 0; i < 16; i++) {
+                                if (Math.abs(detectedFreq - DATA_FREQS[i]) < 35) {
+                                    // Защита от дребезга (получаем подтверждение тона в нескольких кадрах)
+                                    if (i === lastDetectedNibble) {
+                                        sameNibbleCount++;
+                                        if (sameNibbleCount === 2) { // Фиксируем значение
+                                            rxBuffer.push(i);
+                                        }
+                                    } else {
+                                        lastDetectedNibble = i;
+                                        sameNibbleCount = 0;
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+
+                    requestAnimationFrame(processAudio);
+                }
+
+                processAudio();
+
+            } catch (err) {
+                alert("Ошибка доступа к микрофону: " + err);
+            }
+        };
+
+        // Декодирование принятых 4-битных нибблов обратно в байты и текст
+        function decodeBuffer(nibbles) {
+            log(`[RX] Принято нибблов: ${nibbles.length}`);
+            
+            // Если количество нечетное, отбрасываем последний потерянный фрагмент
+            if (nibbles.length % 2 !== 0) nibbles.pop();
+
+            const bytes = [];
+            for (let i = 0; i < nibbles.length; i += 2) {
+                const byte = (nibbles[i] << 4) | nibbles[i + 1];
+                bytes.push(byte);
+            }
+
+            const decoder = new TextDecoder();
+            const decodedString = decoder.decode(new Uint8Array(bytes));
+            
+            document.getElementById('outputText').value = decodedString;
+            log(`[RX] Успешно расшифровано: "${decodedString}"`);
+        }
+    </script>
+</body>
+</html>
