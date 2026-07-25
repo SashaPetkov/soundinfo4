@@ -3,39 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hardened Acoustic Modem (Decoder Resets & VU Meter)</title>
+    <title>Simple Acoustic Packet Transfer</title>
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
         textarea, input { width: 100%; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; font-family: monospace; }
         textarea { height: 80px; }
-        input[type="text"] { margin-bottom: 10px; border-color: #0e639c; }
         button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
         #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
         .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
-        .cache-info { font-size: 11px; color: #ce9178; margin-top: 5px; }
-        .key-box { background: #111; padding: 10px; border: 1px solid #555; border-radius: 4px; margin-bottom: 15px; }
-        
-        /* Индикатор громкости микрофона */
-        .vu-wrapper { width: 100%; background: #111; height: 10px; border-radius: 5px; margin-top: 8px; overflow: hidden; border: 1px solid #444; }
+        .vu-wrapper { width: 100%; background: #111; height: 8px; border-radius: 4px; margin-top: 8px; overflow: hidden; border: 1px solid #444; }
         .vu-bar { height: 100%; width: 0%; background: #4ec9b0; transition: width 0.05s ease-out; }
     </style>
 </head>
 <body>
 
-    <h2>Защищенный Акустический Модем (Сброс декодера + VU-метр)</h2>
-
-    <div class="key-box">
-        <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
-        <input type="text" id="secretPass" value="MypatsonSecret123">
-    </div>
+    <h2>Простая пакетированная акустическая передача</h2>
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Проверка устойчивости с перезапуском декодера GGWave!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Привет! Это тестовая строка для проверки акустической передачи пакетами через GGWave.</textarea>
         <button id="sendBtn">▶ Отправить данные</button>
     </div>
 
@@ -44,18 +34,17 @@
         <button id="listenBtn">🎙 Включить микрофон приёмника</button>
         <span id="listenStatus" class="status">Выключен</span>
 
-        <div class="vu-wrapper" title="Уровень звука с микрофона">
+        <div class="vu-wrapper" title="Уровень звука микрофона">
             <div id="vuBar" class="vu-bar"></div>
         </div>
 
         <div class="progress">
-            Статус сессии: <span id="pktStatus">Ожидание пакетов...</span>
+            Статус приёма: <span id="pktStatus">Ожидание...</span>
         </div>
 
-        <h4>Расшифрованный текст:</h4>
+        <h4>Полученный текст:</h4>
         <textarea id="outputText" readonly></textarea>
-        <div class="cache-info" id="cacheInfo"></div>
-        <button id="clearCacheBtn" style="background: #a12626; padding: 6px 10px; font-size: 11px;">Сбросить кэш</button>
+        <button id="clearBtn" style="background: #a12626; padding: 6px 10px; font-size: 11px;">Очистить</button>
     </div>
 
     <div class="box">
@@ -80,7 +69,7 @@
         
         let currentSourceNode = null;
         let pendingSignal = null;
-        let rawReceivedChunks = {};
+        let receivedChunks = {};
 
         function log(msg) {
             const l = document.getElementById('log');
@@ -95,67 +84,13 @@
         }
 
         // ==========================================
-        // КРИПТОГРАФИЯ (AES-GCM)
-        // ==========================================
-
-        async function deriveKey(passphrase, saltHex) {
-            const enc = new TextEncoder();
-            const keyMaterial = await window.crypto.subtle.importKey(
-                "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
-            );
-            return await window.crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 1000, hash: "SHA-256" },
-                keyMaterial, { name: "AES-GCM", length: 128 }, false, ["encrypt", "decrypt"]
-            );
-        }
-
-        async function encryptText(text, passphrase, saltHex) {
-            const key = await deriveKey(passphrase, saltHex);
-            const iv = window.crypto.getRandomValues(new Uint8Array(12));
-            const ciphertext = await window.crypto.subtle.encrypt(
-                { name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(text)
-            );
-            return bytesToHex(iv) + ":" + bytesToHex(new Uint8Array(ciphertext));
-        }
-
-        async function decryptText(encryptedHex, passphrase, saltHex) {
-            try {
-                const parts = encryptedHex.split(":");
-                const key = await deriveKey(passphrase, saltHex);
-                const decrypted = await window.crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: hexToBytes(parts[0]) }, key, hexToBytes(parts[1])
-                );
-                return new TextDecoder().decode(decrypted);
-            } catch(e) {
-                return null;
-            }
-        }
-
-        function getRandomHex(len) {
-            const arr = new Uint8Array(len);
-            window.crypto.getRandomValues(arr);
-            return bytesToHex(arr);
-        }
-
-        function bytesToHex(bytes) {
-            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-        }
-
-        function hexToBytes(hex) {
-            const bytes = new Uint8Array(hex.length / 2);
-            for (let i = 0; i < hex.length; i += 2) bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
-            return bytes;
-        }
-
-        // ==========================================
         // ИНИЦИАЛИЗАЦИЯ И АУДИОЯДРО
         // ==========================================
         window.onload = function() {
             log("[System] Загрузка ядра GGWave...");
             ggwave_factory().then(function(obj) {
                 ggwave = obj;
-                log("[System] Ядро готово.");
-                restoreFromCache();
+                log("[System] Ядро готово к работе.");
             });
         };
 
@@ -170,17 +105,7 @@
             if (context.state === 'suspended') context.resume();
         }
 
-        // Жесткая перезагрузка экземпляра декодера при зависаниях
-        function resetDecoderInstance() {
-            if (ggwave && instance) {
-                try {
-                    ggwave.free(instance);
-                } catch(e) {}
-                instance = ggwave.init(parameters);
-            }
-        }
-
-        function emitAudioSignal(text, deadTimeMs = 300) {
+        function emitAudioSignal(text, deadTimeMs = 250) {
             return new Promise((resolve) => {
                 initGGWave();
                 if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
@@ -201,74 +126,46 @@
                     setTimeout(() => {
                         isTransmitting = false;
                         resolve();
-                    }, 30);
+                    }, 20);
                 };
                 currentSourceNode.start(0);
             });
         }
 
-        // ==========================================
-        // КЭШ (LOCAL STORAGE)
-        // ==========================================
-        function saveToCache(rawMap) {
-            localStorage.setItem("sec_acoustic_raw_chunks", JSON.stringify(rawMap));
-            updateCacheUI();
-        }
-
-        function restoreFromCache() {
-            const cached = localStorage.getItem("sec_acoustic_raw_chunks");
-            if (cached) {
-                rawReceivedChunks = JSON.parse(cached);
-                updateCacheUI();
-            }
-        }
-
-        function updateCacheUI() {
-            const count = Object.keys(rawReceivedChunks).length;
-            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Накоплено пакетов: ${count}` : "";
-        }
-
-        document.getElementById('clearCacheBtn').onclick = () => {
-            localStorage.removeItem("sec_acoustic_raw_chunks");
-            rawReceivedChunks = {};
+        document.getElementById('clearBtn').onclick = () => {
+            receivedChunks = {};
             document.getElementById('outputText').value = "";
-            document.getElementById('cacheInfo').innerText = "[Кэш] Очищен.";
-            document.getElementById('pktStatus').innerText = "Ожидание пакетов...";
-            log("[Cache] Данные кэша сброшены.");
+            document.getElementById('pktStatus').innerText = "Ожидание...";
+            log("[RX] Буфер очищен.");
         };
 
         // ==========================================
-        // 1. ЛОГИКА ПЕРЕДАТЧИКА (TX)
+        // 1. ПЕРЕДАТЧИК (TX)
         // ==========================================
         document.getElementById('sendBtn').onclick = async () => {
             if (!ggwave) return;
             initGGWave();
             
             const text = document.getElementById('inputText').value;
-            const pass = document.getElementById('secretPass').value;
-            if (!text || !pass) { alert("Введите текст и секретный пароль!"); return; }
+            if (!text) { alert("Введите текст!"); return; }
 
             if (!isListening) await startReceiver();
 
-            // Перезагрузим инстанс декодера перед началом новой сессии
-            resetDecoderInstance();
-            await sleep(200);
+            await sleep(150);
 
-            const sessionSalt = getRandomHex(2); 
-            const CHUNK_SIZE = 18; // Компактный и безопасный размер чанка
+            // Оптимальный размер порции текста в 1 пакете
+            const CHUNK_SIZE = 20; 
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
-            log(`[TX] Старт передачи (${totalPackets} пакет(ов))...`);
+            log(`[TX] Старт передачи (${totalPackets} пакетов)...`);
 
             for (let i = 0; i < totalPackets; i++) {
-                const rawChunk = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-                const encryptedChunk = await encryptText(rawChunk, pass, sessionSalt);
+                const chunkText = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
 
                 const payload = JSON.stringify({
                     i: i,
                     t: totalPackets,
-                    s: sessionSalt,
-                    b: encryptedChunk
+                    d: chunkText
                 });
 
                 let delivered = false;
@@ -278,26 +175,26 @@
                     pktAttempts++;
                     log(`[TX] Отправка пакета #${i + 1}/${totalPackets} (попытка ${pktAttempts})...`);
                     
-                    await emitAudioSignal(payload, 250);
+                    await emitAudioSignal(payload, 200);
 
-                    const ack = await waitForSignal(`ACK:${i}`, 3000);
+                    const ack = await waitForSignal(`ACK:${i}`, 2500);
                     if (ack) {
-                        log(`[TX] Успех! Получен ACK:${i}`);
+                        log(`[TX] Получен ACK:${i}`);
                         delivered = true;
-                        await sleep(150);
+                        await sleep(100);
                     } else {
                         log(`[TX] Таймаут ACK:${i}, повтор...`);
-                        await sleep(200);
+                        await sleep(150);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] ОШИБКА: Пакет #${i + 1} застрял. Передача прервана.`);
+                    log(`[TX] СБОЙ: Пакет #${i + 1} не доставлен. Передача остановлена.`);
                     return;
                 }
             }
 
-            log(`[TX] ГОТОВО! Все пакеты доставлены.`);
+            log(`[TX] УСПЕХ: Все пакеты доставлены!`);
         };
 
         function waitForSignal(type, timeoutMs) {
@@ -309,7 +206,7 @@
                         pendingSignal = null;
                         resolve(res);
                     }
-                }, 30);
+                }, 25);
 
                 setTimeout(() => {
                     clearInterval(checkInterval);
@@ -325,7 +222,7 @@
         }
 
         // ==========================================
-        // 2. ЛОГИКА ПРИЁМНИКА (RX)
+        // 2. ПРИЁМНИК (RX)
         // ==========================================
         document.getElementById('listenBtn').onclick = async () => {
             await startReceiver();
@@ -352,17 +249,14 @@
                     var source = e.inputBuffer;
                     var pcmData = source.getChannelData(0);
 
-                    // Считаем уровень громкости (RMS) для визуализатора
+                    // Индикатор уровня звука
                     let sum = 0;
                     for (let i = 0; i < pcmData.length; i++) {
                         sum += pcmData[i] * pcmData[i];
                     }
                     let rms = Math.sqrt(sum / pcmData.length);
-                    if (vuBar) {
-                        vuBar.style.width = Math.min(100, Math.floor(rms * 400)) + '%';
-                    }
+                    if (vuBar) vuBar.style.width = Math.min(100, Math.floor(rms * 400)) + '%';
 
-                    // Пропускаем декодирование, если идет наша же передача или дедтайм
                     if (isTransmitting || Date.now() < deadTimeUntil) return;
 
                     var res = ggwave.decode(instance, convertTypedArray(new Float32Array(pcmData), Int8Array));
@@ -388,70 +282,41 @@
         async function handleIncomingSignal(rawStr) {
             if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-            // 1. Проверка ACK
+            // 1. Приём ACK
             if (rawStr.includes("ACK:")) {
                 const parts = rawStr.split("ACK:");
                 pendingSignal = { type: `ACK:${parts[1].trim()}` };
                 return;
             }
 
-            // 2. Ловля зашифрованного пакета
+            // 2. Приём Пакета
             const jsonMatch = rawStr.match(/\{"i":.*\}/);
             if (jsonMatch) {
                 try {
                     const pkt = JSON.parse(jsonMatch[0]);
                     if (pkt && typeof pkt.i === 'number') {
-                        log(`[RX] Принят пакет #${pkt.i + 1}/${pkt.t}!`);
+                        log(`[RX] Принят пакет #${pkt.i + 1}/${pkt.t}`);
 
-                        rawReceivedChunks[pkt.i] = { body: pkt.b, salt: pkt.s };
-                        saveToCache(rawReceivedChunks);
+                        receivedChunks[pkt.i] = pkt.d;
+                        document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(receivedChunks).length} / ${pkt.t}`;
 
-                        document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(rawReceivedChunks).length} / ${pkt.t}`;
+                        // Отправляем ACK
+                        await sleep(100);
+                        await emitAudioSignal(`ACK:${pkt.i}`, 350);
 
-                        await sleep(150);
-                        await emitAudioSignal(`ACK:${pkt.i}`, 400);
-
-                        if (Object.keys(rawReceivedChunks).length === pkt.t) {
-                            log("[RX] Все пакеты собраны! Расшифровка...");
-                            await decryptAndAssembleAll(pkt.t);
+                        // Сборка при полном получении
+                        if (Object.keys(receivedChunks).length === pkt.t) {
+                            let fullText = "";
+                            for (let idx = 0; idx < pkt.t; idx++) {
+                                fullText += receivedChunks[idx] || "";
+                            }
+                            document.getElementById('outputText').value = fullText;
+                            log(`[RX] СБОРКА ЗАВЕРШЕНА: "${fullText}"`);
                         }
                     }
                 } catch (e) {
-                    log(`[RX] Ошибка распознавания кадра: ${e.message}`);
+                    log(`[RX] Битый кадр: ${e.message}`);
                 }
-            }
-        }
-
-        // ==========================================
-        // ФИНАЛЬНАЯ СБОРКА И ДЕКРИПТ
-        // ==========================================
-        async function decryptAndAssembleAll(totalPackets) {
-            const pass = document.getElementById('secretPass').value;
-            let fullText = "";
-            let hasError = false;
-
-            for (let i = 0; i < totalPackets; i++) {
-                const chunkData = rawReceivedChunks[i];
-                if (!chunkData) {
-                    hasError = true;
-                    break;
-                }
-
-                const decryptedChunk = await decryptText(chunkData.body, pass, chunkData.salt);
-                if (decryptedChunk === null) {
-                    hasError = true;
-                    log(`[RX] ОШИБКА: Неверный ключ или битые данные!`);
-                    break;
-                }
-                fullText += decryptedChunk;
-            }
-
-            if (!hasError) {
-                document.getElementById('outputText').value = fullText;
-                log(`[RX] УСПЕХ! Текст расшифрован: "${fullText}"`);
-                document.getElementById('pktStatus').innerText = "Расшифровано!";
-            } else {
-                document.getElementById('outputText').value = "❌ [ОШИБКА ДЕКРИПТА: Неверный пароль]";
             }
         }
 
