@@ -3,7 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Acoustic Modem (AES-GCM + Challenge Handshake)</title>
+    <title>Secure Acoustic Modem (HMAC Handshake + AES-GCM)</title>
+    <!-- Подключаем монолитный ggwave.js -->
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -22,7 +23,7 @@
 </head>
 <body>
 
-    <h2>Защищенный Акустический Модем (AES-GCM + Auth)</h2>
+    <h2>Защищенный Акустический Модем (HMAC + AES-GCM)</h2>
 
     <div class="key-box">
         <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
@@ -31,8 +32,8 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите секретный текст...">Секретные данные: Передача через акустический канал с AES-GCM шифрованием и защитой от перехвата.</textarea>
-        <button id="sendBtn">▶ Auth Handshake и Зашифрованная отправка</button>
+        <textarea id="inputText" placeholder="Введите текст...">Секретное сообщение: Успешно поднят надежный защищенный Handshake через HMAC и AES-GCM!</textarea>
+        <button id="sendBtn">▶ HMAC Auth и Отправка</button>
     </div>
 
     <div class="box">
@@ -71,7 +72,6 @@
         let currentSourceNode = null;
 
         let pendingSignal = null;
-        let currentNonce = null; // Защита от Replay-атак
         let receivedChunks = {};
 
         function log(msg) {
@@ -87,29 +87,37 @@
         }
 
         // ==========================================
-        // КРИПТОГРАФИЯ (AES-GCM + PBKDF2 via Web Crypto)
+        // КРИПТОГРАФИЯ (HMAC + AES-GCM via Web Crypto)
         // ==========================================
+
+        // Короткий HMAC-SHA256 для Handshake (длина 16 HEX символов = звук за долю секунды)
+        async function computeHMAC(nonceHex, passphrase) {
+            const enc = new TextEncoder();
+            const key = await window.crypto.subtle.importKey(
+                "raw", enc.encode(passphrase),
+                { name: "HMAC", hash: "SHA-256" },
+                false, ["sign"]
+            );
+            const signature = await window.crypto.subtle.sign("HMAC", key, enc.encode(nonceHex));
+            return bytesToHex(new Uint8Array(signature).slice(0, 8));
+        }
+
         async function deriveKey(passphrase, saltHex) {
             const enc = new TextEncoder();
-            const salt = hexToBytes(saltHex);
-            const keyMaterial = await window.crypto.subscryptKey || window.crypto.subtle.importKey(
+            const keyMaterial = await window.crypto.subtle.importKey(
                 "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
             );
             return await window.crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: salt, iterations: 100000, hash: "SHA-256" },
-                keyMaterial,
-                { name: "AES-GCM", length: 128 },
-                false,
-                ["encrypt", "decrypt"]
+                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 10000, hash: "SHA-256" },
+                keyMaterial, { name: "AES-GCM", length: 128 }, false, ["encrypt", "decrypt"]
             );
         }
 
         async function encryptText(text, passphrase, saltHex) {
             const key = await deriveKey(passphrase, saltHex);
             const iv = window.crypto.getRandomValues(new Uint8Array(12));
-            const enc = new TextEncoder();
             const ciphertext = await window.crypto.subtle.encrypt(
-                { name: "AES-GCM", iv: iv }, key, enc.encode(text)
+                { name: "AES-GCM", iv: iv }, key, new TextEncoder().encode(text)
             );
             return bytesToHex(iv) + ":" + bytesToHex(new Uint8Array(ciphertext));
         }
@@ -117,15 +125,13 @@
         async function decryptText(encryptedHex, passphrase, saltHex) {
             try {
                 const parts = encryptedHex.split(":");
-                const iv = hexToBytes(parts[0]);
-                const ciphertext = hexToBytes(parts[1]);
                 const key = await deriveKey(passphrase, saltHex);
                 const decrypted = await window.crypto.subtle.decrypt(
-                    { name: "AES-GCM", iv: iv }, key, ciphertext
+                    { name: "AES-GCM", iv: hexToBytes(parts[0]) }, key, hexToBytes(parts[1])
                 );
                 return new TextDecoder().decode(decrypted);
             } catch(e) {
-                return null; // Неверный пароль или повреждены данные
+                return null;
             }
         }
 
@@ -146,7 +152,7 @@
         }
 
         // ==========================================
-        // ИНИЦИАЛИЗАЦИЯ И АУДИО
+        // ИНИЦИАЛИЗАЦИЯ И АУДИОЯДРО
         // ==========================================
         window.onload = function() {
             log("[System] Загрузка ядра GGWave...");
@@ -191,7 +197,7 @@
         }
 
         // ==========================================
-        // КЭШ (ШИФРОВАННЫЙ)
+        // КЭШ (LOCAL STORAGE)
         // ==========================================
         function saveToCache(chunksMap) {
             localStorage.setItem("sec_acoustic_chunks", JSON.stringify(chunksMap));
@@ -208,7 +214,7 @@
 
         function updateCacheUI() {
             const count = Object.keys(receivedChunks).length;
-            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] В памяти зашифрованных пакетов: ${count}` : "";
+            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Пакетов в памяти: ${count}` : "";
         }
 
         document.getElementById('clearCacheBtn').onclick = () => {
@@ -217,7 +223,7 @@
             document.getElementById('outputText').value = "";
             document.getElementById('cacheInfo').innerText = "[Кэш] Очищен.";
             document.getElementById('pktStatus').innerText = "Ожидание авторизации...";
-            log("[Cache] Шифрованный кэш очищен.");
+            log("[Cache] Данные кэша сброшены.");
         };
 
         // ==========================================
@@ -233,12 +239,13 @@
 
             if (!isListening) await startReceiver();
 
-            // 1. CHALLENGE-RESPONSE HANDSHAKE
-            const sessionSalt = getRandomHex(8); // Сессионная соль
-            const challengeNonce = getRandomHex(4); // Nonce проверки
+            // 1. AUTH CHALLENGE-RESPONSE (HMAC)
+            const sessionSalt = getRandomHex(4);
+            const challengeNonce = getRandomHex(4);
+            const expectedHmac = await computeHMAC(challengeNonce, pass);
 
-            log("[TX] --- Старт Secure Handshake ---");
-            log(`[TX] Отправка Challenge: Salt=${sessionSalt}, Nonce=${challengeNonce}`);
+            log("[TX] --- Старт HMAC Handshake ---");
+            log(`[TX] Запрос AUTH (Nonce: ${challengeNonce})...`);
 
             let authOk = false;
             let attempts = 0;
@@ -249,13 +256,11 @@
 
                 const response = await waitForSignal("AUTH_RESP", 5000);
                 if (response) {
-                    // Расшифровываем ответ от приёмника
-                    const decryptedNonce = await decryptText(response.payload, pass, sessionSalt);
-                    if (decryptedNonce === challengeNonce) {
+                    if (response.payload === expectedHmac) {
                         authOk = true;
-                        log("[TX] УСПЕХ! Приёмник подтвердил владение паролем.");
+                        log("[TX] УСПЕХ! Приёмник подтвердил пароль через HMAC.");
                     } else {
-                        log("[TX] ОШИБКА: Приёмник прислал неверный ключ auth!");
+                        log("[TX] ОШИБКА: Приёмник прислал неверный HMAC!");
                     }
                 } else {
                     log("[TX] Таймаут ответа Handshake. Повтор...");
@@ -268,9 +273,11 @@
                 return;
             }
 
-            // 2. ПЕРЕДАЧА ЗАШИФРОВАННЫХ ПАКЕТОВ
-            const CHUNK_SIZE = 20; // Чуть меньше, так как AES добавляет IV и AuthTag
+            // 2. ПЕРЕДАЧА AES-GCM ПАКЕТОВ
+            const CHUNK_SIZE = 20;
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
+
+            log(`[TX] Передача зашифрованных пакетов: всего ${totalPackets} шт.`);
 
             for (let i = 0; i < totalPackets; i++) {
                 const rawChunk = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
@@ -293,7 +300,7 @@
 
                     const ack = await waitForSignal(`ACK:${i}`, 5000);
                     if (ack) {
-                        log(`[TX] Получен подлинный ACK:${i}`);
+                        log(`[TX] Получен ACK:${i}`);
                         delivered = true;
                         await sleep(300);
                     } else {
@@ -376,7 +383,7 @@
                 document.getElementById('listenStatus').style.color = "#4ec9b0";
                 log("[RX] Микрофон активен.");
             } catch (err) {
-                alert("Ошибка микрофона: " + err);
+                alert("Ошибка доступа к микрофону: " + err);
             }
         }
 
@@ -386,37 +393,37 @@
             // Обработка Challenge AUTH
             if (rawStr.startsWith("AUTH:")) {
                 const parts = rawStr.split(":");
-                const saltHex = parts[1];
                 const nonceHex = parts[2];
 
-                log(`[RX] Пойман Auth Challenge! Зашифровываем Nonce ответом...`);
+                log(`[RX] Пойман Challenge! Считаем HMAC...`);
 
-                // Шифруем пришедший Nonce паролем
-                const encryptedNonce = await encryptText(nonceHex, pass, saltHex);
+                const hmacRes = await computeHMAC(nonceHex, pass);
 
-                setTimeout(() => {
-                    emitAudioSignal(`S_ACK:${encryptedNonce}`);
+                // Отправляем ультракороткий сигнал SA:<hmac> (всего 19 символов!)
+                setTimeout(async () => {
+                    await emitAudioSignal(`SA:${hmacRes}`);
                 }, 200);
                 return;
             }
 
-            // Обработка ответа на Challenge на передатчике
-            if (rawStr.startsWith("S_ACK:")) {
-                const payload = rawStr.substring(6);
+            // Приём ответа на Handshake (на передатчике)
+            if (rawStr.startsWith("SA:")) {
+                const payload = rawStr.substring(3);
                 pendingSignal = { type: "AUTH_RESP", payload: payload };
                 return;
             }
 
+            // Приём ACK
             if (rawStr.startsWith("ACK:")) {
                 pendingSignal = { type: rawStr };
                 return;
             }
 
-            // Обработка зашифрованного пакета данных
+            // Обработка зашифрованного пакета
             try {
                 const pkt = JSON.parse(rawStr);
                 if (pkt && typeof pkt.id === 'number') {
-                    log(`[RX] Принят зашифрованный пакет #${pkt.id}/${pkt.total}. Расшифровка...`);
+                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Расшифровка...`);
 
                     const decryptedBody = await decryptText(pkt.body, pass, pkt.salt);
 
@@ -432,7 +439,7 @@
                             assembleFinalData(receivedChunks, pkt.total);
                         }
                     } else {
-                        log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key на устройстве!`);
+                        log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key!`);
                     }
                 }
             } catch (e) {}
@@ -444,7 +451,7 @@
                 fullText += chunksMap[i] || "";
             }
             document.getElementById('outputText').value = fullText;
-            log(`[RX] УСПЕХ! Текст полностью восстановлен из AES-GCM: ${fullText.length} симв.`);
+            log(`[RX] УСПЕХ! Текст восстановлен из AES-GCM: ${fullText.length} симв.`);
         }
 
         function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
