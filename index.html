@@ -32,7 +32,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Успешная передача через акустический канал с дедтаймом от эха!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Синхронизация акустических таймингов с разделением dead-time прошлa успешно!</textarea>
         <button id="sendBtn">▶ HMAC Auth и Отправка</button>
     </div>
 
@@ -68,9 +68,9 @@
         let instance = null;
 
         let isListening = false;
-        let isTransmitting = false; // Блокировка приёма во время воспроизведения
-        let deadTimeUntil = 0;      // Защита от эха собственным писком
-        let handshakeCompleted = false; // Флаг пройденного рукопожатия
+        let isTransmitting = false; 
+        let deadTimeUntil = 0;      
+        let handshakeCompleted = false; 
         let currentSourceNode = null;
 
         let pendingSignal = null;
@@ -175,7 +175,8 @@
             if (context.state === 'suspended') context.resume();
         }
 
-        function emitAudioSignal(text) {
+        // Воспроизведение звука с индивидуально регулируемым deadTime
+        function emitAudioSignal(text, deadTimeMs = 700) {
             return new Promise((resolve) => {
                 initGGWave();
                 if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
@@ -192,13 +193,12 @@
                 isTransmitting = true;
 
                 currentSourceNode.onended = () => {
-                    // Глушим микрофон ещё на 700 мс после окончания звука, чтобы эхо полностью затихло
-                    deadTimeUntil = Date.now() + 700;
+                    deadTimeUntil = Date.now() + deadTimeMs;
                     
                     setTimeout(() => {
                         isTransmitting = false;
                         resolve();
-                    }, 150);
+                    }, 100);
                 };
                 currentSourceNode.start(0);
             });
@@ -256,14 +256,16 @@
             const expectedHmac = await computeHMAC(challengeNonce, pass);
 
             log("[TX] --- Старт HMAC Handshake ---");
-            log(`[TX] Запрос AUTH (Nonce: ${challengeNonce})...`);
 
             let authOk = false;
             let attempts = 0;
 
             while (!authOk && attempts < 5) {
                 attempts++;
-                await emitAudioSignal(`AUTH:${sessionSalt}:${challengeNonce}`);
+                log(`[TX] Запрос AUTH (Nonce: ${challengeNonce}, попытка ${attempts})...`);
+                
+                // Передатчик выставляет короткий дедтайм (150мс), чтобы не глушить чужой быстрый ответ
+                await emitAudioSignal(`AUTH:${sessionSalt}:${challengeNonce}`, 150);
 
                 const response = await waitForSignal("AUTH_RESP", 5000);
                 if (response) {
@@ -275,7 +277,7 @@
                     }
                 } else {
                     log("[TX] Таймаут ответа Handshake. Повтор...");
-                    await sleep(300);
+                    await sleep(400);
                 }
             }
 
@@ -307,7 +309,7 @@
                 while (!delivered && pktAttempts < 5) {
                     pktAttempts++;
                     log(`[TX] Отправка AES-пакета #${i + 1}/${totalPackets} (Попытка ${pktAttempts})...`);
-                    await emitAudioSignal(payload);
+                    await emitAudioSignal(payload, 200);
 
                     const ack = await waitForSignal(`ACK:${i}`, 5000);
                     if (ack) {
@@ -376,7 +378,6 @@
                     context.createJavaScriptNode(bufferSize, 1, 1);
 
                 recorder.onaudioprocess = function (e) {
-                    // Игнорируем всё во время звучания или пока не закончился дедтайм
                     if (isTransmitting || Date.now() < deadTimeUntil) return;
 
                     var source = e.inputBuffer;
@@ -417,7 +418,9 @@
 
                 handshakeCompleted = true;
 
-                await emitAudioSignal(`SA:${hmacRes}`);
+                // Даем 350мс паузы, чтобы передатчик успел замолчать и переключиться на приём
+                await sleep(350);
+                await emitAudioSignal(`SA:${hmacRes}`, 700);
                 return;
             }
 
@@ -449,7 +452,8 @@
 
                             document.getElementById('pktStatus').innerText = `Принято и расшифровано: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
 
-                            await emitAudioSignal(`ACK:${pkt.id}`);
+                            await sleep(250);
+                            await emitAudioSignal(`ACK:${pkt.id}`, 700);
 
                             if (Object.keys(receivedChunks).length === pkt.total) {
                                 assembleFinalData(receivedChunks, pkt.total);
