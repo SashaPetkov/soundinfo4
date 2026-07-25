@@ -3,69 +3,47 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Двусторонний M-FSK Модем с Авто-повтором (ARQ)</title>
+    <title>Acoustic Data Link (GGWave)</title>
+    <!-- Подключаем легкую библиотеку GGWave напрямую из CDN -->
+    <script src="https://ggwave.js.org/ggwave.js"></script>
     <style>
-        body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
+        body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
         textarea { width: 100%; height: 90px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
-        button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; }
+        button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 180px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
-        .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>M-FSK с Авто-переотправкой Битых Пакетов (ARQ)</h2>
+    <h2>Звуковой Модем (на базе GGWave WASM)</h2>
 
     <div class="box">
-        <h3>1. Устройство А (Передатчик / ПК)</h3>
-        <textarea id="inputText" placeholder="Введите длинный текст...">Привет! Это проверка автоматической переотправки пакетов. Если пакет повредится, телефон пикнет обратно, и ПК отправит его заново!</textarea>
-        <button id="sendBtn">▶ Начать передачу пакетов</button>
+        <h3>1. Передатчик (TX)</h3>
+        <textarea id="inputText" placeholder="Введите любой текст или данные...">Привет, брат! Теперь всё работает мгновенно и без ошибок CRC!</textarea>
+        <button id="sendBtn">▶ Отправить через звук</button>
     </div>
 
     <div class="box">
-        <h3>2. Устройство Б (Приёмник / Телефон)</h3>
-        <button id="listenBtn">🎙 Включить слух приёмника</button>
+        <h3>2. Приёмник (RX)</h3>
+        <button id="listenBtn">🎙 Включить микрофон</button>
         <span id="listenStatus" class="status">Выключен</span>
 
-        <div class="progress">
-            Прогресс: <span id="pktStatus">Ожидание...</span>
-        </div>
-
-        <h4>Полученный текст:</h4>
+        <h4>Принятый текст:</h4>
         <textarea id="outputText" readonly></textarea>
     </div>
 
     <div class="box">
-        <h4>Лог обмена:</h4>
+        <h4>Лог детектора:</h4>
         <div id="log"></div>
     </div>
 
     <script>
-        // --- НАСТРОЙКИ ЧАСТОТ ---
-        const BASE_FREQ = 1000;   
-        const STEP_FREQ = 100;    
-        const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ); // 1000..2500 Гц
-
-        const FREQ_START = 700;   
-        const FREQ_END = 2800;    
-
-        // Обратные сигналы подтверждения (ACK/NACK)
-        const FREQ_ACK = 500;  // Звук от телефона: "Пакет принят, давай следующий!"
-        const FREQ_NACK = 3300; // Звук от телефона: "Ошибка CRC! Переотправь последний пакет!"
-
-        const TONE_DURATION = 0.12; // 120 мс на тон
-
+        let ggwaveInstance = null;
         let audioCtx = null;
         let isListening = false;
-
-        function getAudioContext() {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-            return audioCtx;
-        }
 
         function log(msg) {
             const l = document.getElementById('log');
@@ -73,117 +51,54 @@
             l.scrollTop = l.scrollHeight;
         }
 
-        function calcCRC(bytes) {
-            let crc = 0;
-            for (let b of bytes) crc = (crc + b) & 0xFF;
-            return crc;
+        // Инициализация библиотечного движка
+        window.onload = async () => {
+            log("Инициализация ядра GGWave (WASM)...");
+            ggwaveFactory().then((instance) => {
+                ggwaveInstance = instance;
+                log("Движок готов к работе!");
+            });
+        };
+
+        function getAudioContext() {
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            return audioCtx;
         }
 
         // ==========================================
-        // 1. ПЕРЕДАТЧИК С ПОДДЕРЖКОЙ ПОВТОРА (TX)
+        // 1. ПЕРЕДАТЧИК (TX)
         // ==========================================
-        document.getElementById('sendBtn').onclick = async () => {
+        document.getElementById('sendBtn').onclick = () => {
+            if (!ggwaveInstance) { alert("Ядро ещё загружается..."); return; }
             const ctx = getAudioContext();
             const text = document.getElementById('inputText').value;
             if (!text) return;
 
-            // Включаем микрофон на ПК, чтобы слышать ответные сигналы телефона!
-            await startFeedbackListener(ctx);
+            log(`[TX] Генерация аудио-пакета...`);
 
-            const encoder = new TextEncoder();
-            const rawBytes = encoder.encode(text);
+            // Протокол 1: Fast / Normal (звучит как шипение/пшик — быстро и надежно)
+            // Использовать Protocol 0 для слышимых тонов или Protocol 1 для ультра-быстрого шипения
+            const waveform = ggwaveInstance.encode(text, ggwaveInstance.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10;
 
-            // Режем на пакеты по 16 байт
-            const CHUNK_SIZE = 16;
-            const totalPackets = Math.ceil(rawBytes.length / CHUNK_SIZE);
+            // Создаем звуковой буфер напрямую
+            const buf = ctx.createBuffer(1, waveform.length, ctx.sampleRate);
+            buf.getChannelData(0).set(waveform);
 
-            log(`[TX] Начинаем передачу ${totalPackets} пакетов...`);
+            const source = ctx.createBufferSource();
+            source.buffer = buf;
+            source.connect(ctx.destination);
+            source.start();
 
-            for (let p = 0; p < totalPackets; p++) {
-                let success = false;
-                let attempts = 0;
-
-                const chunk = rawBytes.slice(p * CHUNK_SIZE, (p + 1) * CHUNK_SIZE);
-                const packet = new Uint8Array(chunk.length + 3);
-                packet[0] = p; // ID пакета
-                packet[1] = totalPackets; // Всего
-                packet.set(chunk, 2);
-                packet[packet.length - 1] = calcCRC(packet.subarray(0, packet.length - 1));
-
-                while (!success && attempts < 5) {
-                    attempts++;
-                    log(`[TX] Отправка пакета ${p + 1}/${totalPackets} (Попытка ${attempts})...`);
-                    
-                    await sendAudioPacket(ctx, packet);
-
-                    // Ждем обратный ответ от телефона (ACK или NACK) в течение 2.5 секунд
-                    const response = await waitForFeedback(2500);
-
-                    if (response === 'ACK') {
-                        log(`[TX] Получено подтверждение ACK! Переходим к следующему.`);
-                        success = true;
-                    } else if (response === 'NACK') {
-                        log(`[TX] Телефон ответил NACK (Ошибка)! Повторяем отправку...`);
-                        await sleep(500);
-                    } else {
-                        log(`[TX] Таймаут ответа! Повторяем отправку пакета...`);
-                        await sleep(500);
-                    }
-                }
-
-                if (!success) {
-                    log(`[TX] КРИТИЧЕСКАЯ ОШИБКА: Не удалось доставить пакет ${p + 1} за 5 попыток.`);
-                    return;
-                }
-            }
-
-            log(`[TX] ВСЕ ПАКЕТЫ УСПЕШНО ДОСТАВЛЕНЫ!`);
+            log(`[TX] Передача завершена (${text.length} символов).`);
         };
 
-        function sendAudioPacket(ctx, packetBytes) {
-            return new Promise(resolve => {
-                let startTime = ctx.currentTime + 0.1;
-
-                // Старт
-                playTone(ctx, FREQ_START, startTime, TONE_DURATION * 2);
-                startTime += TONE_DURATION * 2;
-
-                // Байт за байтом
-                for (let b of packetBytes) {
-                    const high = (b >> 4) & 0x0F;
-                    const low = b & 0x0F;
-
-                    playTone(ctx, DATA_FREQS[high], startTime, TONE_DURATION);
-                    startTime += TONE_DURATION;
-
-                    playTone(ctx, DATA_FREQS[low], startTime, TONE_DURATION);
-                    startTime += TONE_DURATION;
-                }
-
-                // Стоп
-                playTone(ctx, FREQ_END, startTime, TONE_DURATION * 2);
-                startTime += TONE_DURATION * 2;
-
-                setTimeout(resolve, (startTime - ctx.currentTime) * 1000);
-            });
-        }
-
-        function playTone(ctx, freq, time, duration) {
-            const osc = ctx.createOscillator();
-            const gain = ctx.createGain();
-            osc.frequency.setValueAtTime(freq, time);
-            gain.gain.setValueAtTime(0.25, time);
-            osc.connect(gain);
-            gain.connect(ctx.destination);
-            osc.start(time);
-            osc.stop(time + duration);
-        }
-
         // ==========================================
-        // 2. ПРИЁМНИК С ОТПРАВКОЙ СИГНАЛОВ (RX)
+        // 2. ПРИЁМНИК (RX)
         // ==========================================
         document.getElementById('listenBtn').onclick = async () => {
             if (isListening) return;
+            if (!ggwaveInstance) { alert("Ядро ещё загружается..."); return; }
 
             const ctx = getAudioContext();
             try {
@@ -196,195 +111,34 @@
                 document.getElementById('listenStatus').style.color = "#4ec9b0";
 
                 const source = ctx.createMediaStreamSource(stream);
-                const analyser = ctx.createAnalyser();
-                analyser.fftSize = 2048; 
-                source.connect(analyser);
+                // Захватываем звук чанками через ScriptProcessor
+                const recorder = ctx.createScriptProcessor(1024, 1, 1);
 
-                const bufferLength = analyser.frequencyBinCount;
-                const dataArray = new Float32Array(bufferLength);
+                // Создаем инстанс захвата в декодере GGWave
+                const instanceId = ggwaveInstance.init();
 
-                let isReceiving = false;
-                let receivedPackets = {};
-
-                function getPeak() {
-                    analyser.getFloatFrequencyData(dataArray);
-                    let maxDb = -Infinity;
-                    let maxIndex = -1;
-                    for (let i = 0; i < bufferLength; i++) {
-                        if (dataArray[i] > maxDb) {
-                            maxDb = dataArray[i];
-                            maxIndex = i;
-                        }
-                    }
-                    return { freq: maxIndex * (ctx.sampleRate / analyser.fftSize), db: maxDb };
-                }
-
-                function monitor() {
+                recorder.onaudioprocess = (e) => {
                     if (!isListening) return;
-                    const peak = getPeak();
+                    const inputData = e.inputBuffer.getChannelData(0);
 
-                    if (!isReceiving && peak.db > -70 && Math.abs(peak.freq - FREQ_START) < 60) {
-                        isReceiving = true;
-                        let rxNibbles = [];
-                        log("[RX] Приём пакета...");
+                    // Передаем сырые сэмплы прямо в C++ ядро GGWave
+                    const res = ggwaveInstance.decode(instanceId, inputData);
 
-                        setTimeout(() => {
-                            const timer = setInterval(() => {
-                                const current = getPeak();
-
-                                if (current.db > -70 && Math.abs(current.freq - FREQ_END) < 60) {
-                                    clearInterval(timer);
-                                    isReceiving = false;
-
-                                    // Декодируем и проверяем CRC пакета
-                                    const processResult = processRxNibbles(rxNibbles);
-
-                                    if (processResult.ok) {
-                                        log(`[RX] Пакет #${processResult.id + 1} принят корректно! Пищим ACK...`);
-                                        receivedPackets[processResult.id] = processResult.data;
-                                        
-                                        document.getElementById('pktStatus').innerText = `Принято: ${Object.keys(receivedPackets).length} / ${processResult.total}`;
-                                        
-                                        // Отправляем звуковой ACK обратно на ПК
-                                        playTone(ctx, FREQ_ACK, ctx.currentTime, 0.3);
-
-                                        if (Object.keys(receivedPackets).length === processResult.total) {
-                                            assembleAllData(receivedPackets);
-                                        }
-                                    } else {
-                                        log(`[RX] ОШИБКА CRC! Отправляем сигнал NACK на ПК для повтора...`);
-                                        // Отправляем звуковой NACK обратно на ПК
-                                        playTone(ctx, FREQ_NACK, ctx.currentTime, 0.3);
-                                    }
-
-                                    return;
-                                }
-
-                                let bestNibble = -1;
-                                let minDiff = Infinity;
-                                for (let i = 0; i < 16; i++) {
-                                    const diff = Math.abs(current.freq - DATA_FREQS[i]);
-                                    if (diff < minDiff && diff < 50) {
-                                        minDiff = diff;
-                                        bestNibble = i;
-                                    }
-                                }
-
-                                if (bestNibble !== -1 && current.db > -80) {
-                                    rxNibbles.push(bestNibble);
-                                } else {
-                                    rxNibbles.push(0);
-                                }
-
-                            }, TONE_DURATION * 1000);
-                        }, TONE_DURATION * 1500);
+                    // Если библиотека смогла расшифровать данные из потока
+                    if (res && res.length > 0) {
+                        const decodedText = new TextDecoder().decode(res);
+                        log(`[RX] УСПЕХ! Приняты данные: "${decodedText}"`);
+                        document.getElementById('outputText').value = decodedText;
                     }
+                };
 
-                    requestAnimationFrame(monitor);
-                }
-
-                monitor();
+                source.connect(recorder);
+                recorder.connect(ctx.destination);
 
             } catch (err) {
                 alert("Ошибка доступа к микрофону: " + err);
             }
         };
-
-        function processRxNibbles(nibbles) {
-            if (nibbles.length % 2 !== 0) nibbles.pop();
-            const bytes = [];
-            for (let i = 0; i < nibbles.length; i += 2) {
-                bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
-            }
-
-            if (bytes.length < 4) return { ok: false };
-
-            const receivedCRC = bytes.pop();
-            const dataBytes = new Uint8Array(bytes);
-            const expectedCRC = calcCRC(dataBytes);
-
-            if (receivedCRC === expectedCRC) {
-                return {
-                    ok: true,
-                    id: dataBytes[0],
-                    total: dataBytes[1],
-                    data: dataBytes.subarray(2)
-                };
-            }
-            return { ok: false };
-        }
-
-        // ==========================================
-        // 3. ОБРАТНАЯ СВЯЗЬ (ПК СЛУШАЕТ ТЕЛЕФОН)
-        // ==========================================
-        let feedbackResolver = null;
-
-        async function startFeedbackListener(ctx) {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const source = ctx.createMediaStreamSource(stream);
-            const analyser = ctx.createAnalyser();
-            analyser.fftSize = 2048;
-            source.connect(analyser);
-
-            const bufferLength = analyser.frequencyBinCount;
-            const dataArray = new Float32Array(bufferLength);
-
-            function listenLoop() {
-                analyser.getFloatFrequencyData(dataArray);
-                let maxDb = -Infinity;
-                let maxIndex = -1;
-                for (let i = 0; i < bufferLength; i++) {
-                    if (dataArray[i] > maxDb) {
-                        maxDb = dataArray[i];
-                        maxIndex = i;
-                    }
-                }
-                const freq = maxIndex * (ctx.sampleRate / analyser.fftSize);
-
-                if (maxDb > -70 && feedbackResolver) {
-                    if (Math.abs(freq - FREQ_ACK) < 50) {
-                        feedbackResolver('ACK');
-                        feedbackResolver = null;
-                    } else if (Math.abs(freq - FREQ_NACK) < 50) {
-                        feedbackResolver('NACK');
-                        feedbackResolver = null;
-                    }
-                }
-                requestAnimationFrame(listenLoop);
-            }
-            listenLoop();
-        }
-
-        function waitForFeedback(timeoutMs) {
-            return new Promise(resolve => {
-                feedbackResolver = resolve;
-                setTimeout(() => {
-                    if (feedbackResolver) {
-                        feedbackResolver(null);
-                        feedbackResolver = null;
-                    }
-                }, timeoutMs);
-            });
-        }
-
-        function assembleAllData(packetsMap) {
-            const keys = Object.keys(packetsMap).map(Number).sort((a, b) => a - b);
-            let totalBytes = 0;
-            keys.forEach(k => totalBytes += packetsMap[k].length);
-
-            const resultBytes = new Uint8Array(totalBytes);
-            let offset = 0;
-            keys.forEach(k => {
-                resultBytes.set(packetsMap[k], offset);
-                offset += packetsMap[k].length;
-            });
-
-            const decoder = new TextDecoder();
-            document.getElementById('outputText').value = decoder.decode(resultBytes);
-            log(`[RX] ТЕКСТ ПОЛНОСТЬЮ СОБРАН БЕЗ ОШИБОК!`);
-        }
-
-        function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
     </script>
 </body>
 </html>
