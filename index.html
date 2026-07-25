@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Надёжный M-FSK Модем</title>
+    <title>M-FSK с Тактовой Синхронизацией</title>
     <style>
         body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
         textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
@@ -12,12 +12,11 @@
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
         #log { background: #111; padding: 10px; height: 160px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
-        .monitor { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>Устойчивый M-FSK Модем v2</h2>
+    <h2>M-FSK v3 (Clock Synchronized)</h2>
 
     <div class="box">
         <h3>1. Передатчик (TX)</h3>
@@ -29,10 +28,6 @@
         <h3>2. Приёмник (RX)</h3>
         <button id="listenBtn">🎙 Включить микрофон</button>
         <span id="listenStatus" class="status">Выключен</span>
-        
-        <div class="monitor">
-            Детект частоты: <span id="freqVal">0</span> Гц | Громкость: <span id="dbVal">-100</span> dB
-        </div>
 
         <h4>Полученный текст:</h4>
         <textarea id="outputText" readonly></textarea>
@@ -44,29 +39,26 @@
     </div>
 
     <script>
-        // --- НАСТРОЙКИ МОДЕМА С ПОВЫШЕННОЙ НАДЕЖНОСТЬЮ ---
+        // --- НАСТРОЙКИ МОДЕМА ---
         const BASE_FREQ = 1200;   
-        const STEP_FREQ = 150;    // Широкий шаг для борьбы с искажениями динамика
-        const FREQ_START = 850;   // Маркер старта
-        const FREQ_END = 3700;    // Маркер стопа
-        
-        // 16 частот (от 1200 Гц до 3450 Гц)
+        const STEP_FREQ = 130;    
         const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ);
 
-        // Увеличенная длительность для защиты от эха
-        const TONE_DURATION = 0.12;  // 120 мс на тон
-        const PAUSE_DURATION = 0.04; // 40 мс тишины между тонами
+        // Тактовые частоты (Синхронизация)
+        const CLOCK_A = 3600; 
+        const CLOCK_B = 4000; 
+
+        const FREQ_START = 800;   
+        const FREQ_END = 4500;    
+
+        const TONE_DURATION = 0.10; // 100 мс на тон
 
         let audioCtx = null;
         let isListening = false;
 
         function getAudioContext() {
-            if (!audioCtx) {
-                audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-            }
-            if (audioCtx.state === 'suspended') {
-                audioCtx.resume();
-            }
+            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
             return audioCtx;
         }
 
@@ -74,6 +66,13 @@
             const l = document.getElementById('log');
             l.innerHTML += msg + '<br>';
             l.scrollTop = l.scrollHeight;
+        }
+
+        // Простая контрольная сумма (CRC8)
+        function calcCRC(bytes) {
+            let crc = 0;
+            for (let b of bytes) crc = (crc + b) & 0xFF;
+            return crc;
         }
 
         // ==========================================
@@ -85,49 +84,63 @@
             if (!text) return;
 
             const encoder = new TextEncoder();
-            const bytes = encoder.encode(text);
-
-            const sequence = [];
+            const rawBytes = encoder.encode(text);
             
-            // Заголовок (3 стартовых тона для надежного захвата)
-            sequence.push(FREQ_START, FREQ_START, FREQ_START);
+            // Добавляем контрольную сумму в конец
+            const bytes = new Uint8Array(rawBytes.length + 1);
+            bytes.set(rawBytes);
+            bytes[rawBytes.length] = calcCRC(rawBytes);
 
-            for (let b of bytes) {
-                const highNibble = (b >> 4) & 0x0F;
-                const lowNibble = b & 0x0F;
-                sequence.push(DATA_FREQS[highNibble]);
-                sequence.push(DATA_FREQS[lowNibble]);
-            }
-
-            // Конец (2 стоповых тона)
-            sequence.push(FREQ_END, FREQ_END);
-
-            log(`[TX] Отправка... Байтов: ${bytes.length}, тонов: ${sequence.length}`);
+            log(`[TX] Отправка... Байтов (с CRC): ${bytes.length}`);
 
             let startTime = ctx.currentTime + 0.1;
 
-            for (let freq of sequence) {
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
+            // Воспроизведение старта
+            playTone(ctx, FREQ_START, CLOCK_A, startTime, TONE_DURATION * 2);
+            startTime += TONE_DURATION * 2;
 
-                osc.frequency.setValueAtTime(freq, startTime);
-                osc.type = 'sine';
+            let clockState = false;
 
-                // Колоколообразный огибающий сигнал (Bell Curve) против щелчков
-                gain.gain.setValueAtTime(0, startTime);
-                gain.gain.linearRampToValueAtTime(0.3, startTime + 0.01);
-                gain.gain.setValueAtTime(0.3, startTime + TONE_DURATION - 0.01);
-                gain.gain.linearRampToValueAtTime(0, startTime + TONE_DURATION);
+            for (let b of bytes) {
+                const high = (b >> 4) & 0x0F;
+                const low = b & 0x0F;
 
-                osc.connect(gain);
-                gain.connect(ctx.destination);
+                // Передаем старший ниббл
+                clockState = !clockState;
+                playTone(ctx, DATA_FREQS[high], clockState ? CLOCK_A : CLOCK_B, startTime, TONE_DURATION);
+                startTime += TONE_DURATION;
 
-                osc.start(startTime);
-                osc.stop(startTime + TONE_DURATION);
-
-                startTime += TONE_DURATION + PAUSE_DURATION;
+                // Передаем младший ниббл
+                clockState = !clockState;
+                playTone(ctx, DATA_FREQS[low], clockState ? CLOCK_A : CLOCK_B, startTime, TONE_DURATION);
+                startTime += TONE_DURATION;
             }
+
+            // Воспроизведение стопа
+            playTone(ctx, FREQ_END, CLOCK_B, startTime, TONE_DURATION * 2);
         };
+
+        function playTone(ctx, dataFreq, clockFreq, time, duration) {
+            // Генератор данных
+            const osc1 = ctx.createOscillator();
+            const gain1 = ctx.createGain();
+            osc1.frequency.setValueAtTime(dataFreq, time);
+            gain1.gain.setValueAtTime(0.2, time);
+            osc1.connect(gain1);
+            gain1.connect(ctx.destination);
+            osc1.start(time);
+            osc1.stop(time + duration);
+
+            // Генератор такта (Clock)
+            const osc2 = ctx.createOscillator();
+            const gain2 = ctx.createGain();
+            osc2.frequency.setValueAtTime(clockFreq, time);
+            gain2.gain.setValueAtTime(0.15, time);
+            osc2.connect(gain2);
+            gain2.connect(ctx.destination);
+            osc2.start(time);
+            osc2.stop(time + duration);
+        }
 
         // ==========================================
         // 2. ПРИЁМНИК (RX)
@@ -138,11 +151,7 @@
             const ctx = getAudioContext();
             try {
                 const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: {
-                        echoCancellation: false,
-                        noiseSuppression: false,
-                        autoGainControl: false
-                    } 
+                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
                 });
 
                 isListening = true;
@@ -151,98 +160,80 @@
 
                 const source = ctx.createMediaStreamSource(stream);
                 const analyser = ctx.createAnalyser();
-                analyser.fftSize = 4096; 
-                analyser.smoothingTimeConstant = 0.0; // Отключаем сглаживание для мгновенной реакции
+                analyser.fftSize = 2048; 
+                analyser.smoothingTimeConstant = 0.0; 
                 source.connect(analyser);
 
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Float32Array(bufferLength);
 
-                let rxBuffer = [];
+                let rxNibbles = [];
                 let receiving = false;
-                
-                let currentTone = -1;
-                let toneHoldTime = 0;
-                let lastRecordedTone = -1;
-
-                const freqValEl = document.getElementById('freqVal');
-                const dbValEl = document.getElementById('dbVal');
+                let lastClockState = null;
 
                 function processAudio() {
                     if (!isListening) return;
 
                     analyser.getFloatFrequencyData(dataArray);
 
-                    let maxDb = -Infinity;
-                    let maxIndex = -1;
-
-                    for (let i = 0; i < bufferLength; i++) {
-                        if (dataArray[i] > maxDb) {
-                            maxDb = dataArray[i];
-                            maxIndex = i;
+                    // Вспомогательная функция поиска пика возле частоты
+                    function getPeakFreqAround(targetFreq, range) {
+                        let maxDb = -Infinity;
+                        let foundFreq = -1;
+                        for (let i = 0; i < bufferLength; i++) {
+                            const freq = i * (ctx.sampleRate / analyser.fftSize);
+                            if (Math.abs(freq - targetFreq) <= range) {
+                                if (dataArray[i] > maxDb) {
+                                    maxDb = dataArray[i];
+                                    foundFreq = freq;
+                                }
+                            }
                         }
+                        return { freq: foundFreq, db: maxDb };
                     }
 
-                    const detectedFreq = maxIndex * (ctx.sampleRate / analyser.fftSize);
+                    // Ищем старт/стоп
+                    const startCheck = getPeakFreqAround(FREQ_START, 50);
+                    const stopCheck = getPeakFreqAround(FREQ_END, 50);
 
-                    freqValEl.innerText = Math.round(detectedFreq);
-                    dbValEl.innerText = Math.round(maxDb);
+                    if (!receiving && startCheck.db > -70) {
+                        receiving = true;
+                        rxNibbles = [];
+                        lastClockState = null;
+                        log("[RX] Старт принят!");
+                    } else if (receiving && stopCheck.db > -70) {
+                        receiving = false;
+                        log("[RX] Стоп принят!");
+                        decodePacket(rxNibbles);
+                    } else if (receiving) {
+                        // Определяем текущий такт (Clock A или Clock B)
+                        const clockA = getPeakFreqAround(CLOCK_A, 60);
+                        const clockB = getPeakFreqAround(CLOCK_B, 60);
 
-                    // Фильтр громкости
-                    if (maxDb > -70) { 
-                        
-                        // Детекция Старта
-                        if (!receiving && Math.abs(detectedFreq - FREQ_START) < 60) {
-                            receiving = true;
-                            rxBuffer = [];
-                            lastRecordedTone = -1;
-                            log("[RX] Старт принят!");
-                        }
+                        let currentClock = null;
+                        if (clockA.db > -75 && clockA.db > clockB.db) currentClock = 'A';
+                        else if (clockB.db > -75 && clockB.db > clockA.db) currentClock = 'B';
 
-                        // Детекция Стопа
-                        else if (receiving && Math.abs(detectedFreq - FREQ_END) < 60) {
-                            receiving = false;
-                            log("[RX] Стоп принят!");
-                            decodeBuffer(rxBuffer);
-                        }
+                        // СМЕНА ТАКТА = новый тон!
+                        if (currentClock && currentClock !== lastClockState) {
+                            lastClockState = currentClock;
 
-                        // Считывание данных
-                        else if (receiving) {
+                            // Считываем частоту данных
+                            let maxDataDb = -Infinity;
                             let detectedNibble = -1;
 
                             for (let i = 0; i < 16; i++) {
-                                if (Math.abs(detectedFreq - DATA_FREQS[i]) < 60) {
+                                const check = getPeakFreqAround(DATA_FREQS[i], 45);
+                                if (check.db > maxDataDb) {
+                                    maxDataDb = check.db;
                                     detectedNibble = i;
-                                    break;
                                 }
                             }
 
-                            // Логика защиты от дублирования одного тона:
-                            // Сохраняем значение только если частота изменилась или прервалась паузой
-                            if (detectedNibble !== -1) {
-                                if (detectedNibble === currentTone) {
-                                    toneHoldTime++;
-                                    // Если тон держится достаточно долго и мы его еще не записывали для этой фазы
-                                    if (toneHoldTime >= 3 && lastRecordedTone !== detectedNibble) {
-                                        rxBuffer.push(detectedNibble);
-                                        lastRecordedTone = detectedNibble;
-                                    }
-                                } else {
-                                    currentTone = detectedNibble;
-                                    toneHoldTime = 0;
-                                }
-                            } else {
-                                // Тишина между тонами сбрасывает прошлый записанный тон
-                                currentTone = -1;
-                                toneHoldTime = 0;
-                                lastRecordedTone = -1;
+                            if (detectedNibble !== -1 && maxDataDb > -75) {
+                                rxNibbles.push(detectedNibble);
                             }
                         }
-                    } else {
-                        // Если настала тишина
-                        currentTone = -1;
-                        toneHoldTime = 0;
-                        lastRecordedTone = -1;
                     }
 
                     requestAnimationFrame(processAudio);
@@ -255,26 +246,33 @@
             }
         };
 
-        function decodeBuffer(nibbles) {
-            log(`[RX] Всего принято символов: ${nibbles.length}`);
-            
-            if (nibbles.length % 2 !== 0) {
-                log("[RX] Предупреждение: Нечетное кол-во фрагментов, отбрасываем последний.");
-                nibbles.pop();
-            }
+        function decodePacket(nibbles) {
+            log(`[RX] Всего принятых нибблов: ${nibbles.length}`);
+            if (nibbles.length % 2 !== 0) nibbles.pop();
 
             const bytes = [];
             for (let i = 0; i < nibbles.length; i += 2) {
-                const byte = (nibbles[i] << 4) | nibbles[i + 1];
-                bytes.push(byte);
+                bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
             }
 
-            // Безопасное декодирование (выкидывает поломанные байты вместо знаков вопросов)
-            const decoder = new TextDecoder('utf-8', { fatal: false });
-            const decodedString = decoder.decode(new Uint8Array(bytes));
-            
-            document.getElementById('outputText').value = decodedString;
-            log(`[RX] Результат: "${decodedString}"`);
+            if (bytes.length < 2) {
+                log("[RX] Ошибка: Слишком короткий пакет.");
+                return;
+            }
+
+            // Отделяем данные от CRC
+            const receivedCRC = bytes.pop();
+            const dataBytes = new Uint8Array(bytes);
+            const expectedCRC = calcCRC(dataBytes);
+
+            if (receivedCRC === expectedCRC) {
+                const decoder = new TextDecoder();
+                const resultText = decoder.decode(dataBytes);
+                document.getElementById('outputText').value = resultText;
+                log(`[RX] УСПЕХ! CRC совпал. Текст: "${resultText}"`);
+            } else {
+                log(`[RX] ОШИБКА CRC! Данные повреждены (Ожидалось ${expectedCRC}, получено ${receivedCRC}).`);
+            }
         }
     </script>
 </body>
