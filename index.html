@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Hardened Acoustic Modem (HMAC + AES-GCM)</title>
-    <!-- Подключаем однофайловый ggwave.js -->
+    <title>Hardened Acoustic Modem (Finite State Machine Fix)</title>
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -23,7 +22,7 @@
 </head>
 <body>
 
-    <h2>Защищенный Акустический Модем (HMAC + AES-GCM)</h2>
+    <h2>Защищенный Акустический Модем (State-Machine Fix)</h2>
 
     <div class="key-box">
         <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
@@ -32,7 +31,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Синхронизация акустических таймингов с разделением dead-time прошлa успешно!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Проверка синхронизации асинхронного автомата состояний!</textarea>
         <button id="sendBtn">▶ HMAC Auth и Отправка</button>
     </div>
 
@@ -70,9 +69,11 @@
         let isListening = false;
         let isTransmitting = false; 
         let deadTimeUntil = 0;      
-        let handshakeCompleted = false; 
+        
+        // СОСТОЯНИЯ ПРИЁМНИКА: "IDLE", "WAIT_DATA"
+        let rxState = "IDLE"; 
+        
         let currentSourceNode = null;
-
         let pendingSignal = null;
         let receivedChunks = {};
 
@@ -175,8 +176,7 @@
             if (context.state === 'suspended') context.resume();
         }
 
-        // Воспроизведение звука с индивидуально регулируемым deadTime
-        function emitAudioSignal(text, deadTimeMs = 700) {
+        function emitAudioSignal(text, deadTimeMs = 800) {
             return new Promise((resolve) => {
                 initGGWave();
                 if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
@@ -228,7 +228,7 @@
         document.getElementById('clearCacheBtn').onclick = () => {
             localStorage.removeItem("sec_acoustic_chunks");
             receivedChunks = {};
-            handshakeCompleted = false;
+            rxState = "IDLE";
             document.getElementById('outputText').value = "";
             document.getElementById('cacheInfo').innerText = "[Кэш] Очищен.";
             document.getElementById('pktStatus').innerText = "Ожидание авторизации...";
@@ -248,7 +248,7 @@
 
             if (!isListening) await startReceiver();
 
-            handshakeCompleted = false;
+            rxState = "IDLE";
 
             // 1. AUTH CHALLENGE-RESPONSE (HMAC)
             const sessionSalt = getRandomHex(4);
@@ -264,20 +264,21 @@
                 attempts++;
                 log(`[TX] Запрос AUTH (Nonce: ${challengeNonce}, попытка ${attempts})...`);
                 
-                // Передатчик выставляет короткий дедтайм (150мс), чтобы не глушить чужой быстрый ответ
-                await emitAudioSignal(`AUTH:${sessionSalt}:${challengeNonce}`, 150);
+                // Передатчик выставляет МИНИМАЛЬНЫЙ дедтайм (50мс), чтобы сразу начать слушать ответ
+                await emitAudioSignal(`AUTH:${sessionSalt}:${challengeNonce}`, 50);
 
-                const response = await waitForSignal("AUTH_RESP", 5000);
+                // Даем приёмнику 600мс задержки на отписк ответа SA:hmac
+                const response = await waitForSignal("AUTH_RESP", 6000);
                 if (response) {
                     if (response.payload === expectedHmac) {
                         authOk = true;
-                        log("[TX] УСПЕХ! Приёмник подтвердил пароль через HMAC.");
+                        log("[TX] УСПЕХ! Рукопожатие подтверждено.");
                     } else {
-                        log("[TX] ОШИБКА: Приёмник прислал неверный HMAC!");
+                        log("[TX] ОШИБКА: Неверный HMAC от приёмника!");
                     }
                 } else {
                     log("[TX] Таймаут ответа Handshake. Повтор...");
-                    await sleep(400);
+                    await sleep(600);
                 }
             }
 
@@ -309,16 +310,16 @@
                 while (!delivered && pktAttempts < 5) {
                     pktAttempts++;
                     log(`[TX] Отправка AES-пакета #${i + 1}/${totalPackets} (Попытка ${pktAttempts})...`);
-                    await emitAudioSignal(payload, 200);
+                    await emitAudioSignal(payload, 100);
 
                     const ack = await waitForSignal(`ACK:${i}`, 5000);
                     if (ack) {
                         log(`[TX] Получен ACK:${i}`);
                         delivered = true;
-                        await sleep(300);
+                        await sleep(400);
                     } else {
                         log(`[TX] Таймаут ACK:${i}. Повтор...`);
-                        await sleep(400);
+                        await sleep(500);
                     }
                 }
 
@@ -406,21 +407,29 @@
 
             const pass = document.getElementById('secretPass').value;
 
-            // 1. Приём AUTH Challenge
+            // 1. Приём AUTH Challenge (Срабатывает ТОЛЬКО в состоянии IDLE)
             if (rawStr.startsWith("AUTH:")) {
-                if (handshakeCompleted) return;
+                if (rxState !== "IDLE") {
+                    // Если мы уже перешли в WAIT_DATA, ИГНОРИРУЕМ повторные AUTH!
+                    return; 
+                }
 
                 const parts = rawStr.split(":");
                 const nonceHex = parts[2];
 
-                log(`[RX] Пойман Challenge! Считаем HMAC...`);
+                log(`[RX] Пойман AUTH! Вычисляем HMAC...`);
                 const hmacRes = await computeHMAC(nonceHex, pass);
 
-                handshakeCompleted = true;
+                // МЕНЯЕМ СОСТОЯНИЕ: Теперь мы ждем ТОЛЬКО данные
+                rxState = "WAIT_DATA"; 
 
-                // Даем 350мс паузы, чтобы передатчик успел замолчать и переключиться на приём
-                await sleep(350);
-                await emitAudioSignal(`SA:${hmacRes}`, 700);
+                // Выжидаем 400мс паузы перед отправкой
+                await sleep(400);
+                
+                // Излучаем SA:hmac и глушим микрофон от собственного эха на 1500 миллисекунд!
+                await emitAudioSignal(`SA:${hmacRes}`, 1500);
+                
+                log(`[RX] HMAC отправлен. Режим переключен в ожидания данных.`);
                 return;
             }
 
@@ -452,12 +461,12 @@
 
                             document.getElementById('pktStatus').innerText = `Принято и расшифровано: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
 
-                            await sleep(250);
-                            await emitAudioSignal(`ACK:${pkt.id}`, 700);
+                            await sleep(300);
+                            await emitAudioSignal(`ACK:${pkt.id}`, 800);
 
                             if (Object.keys(receivedChunks).length === pkt.total) {
                                 assembleFinalData(receivedChunks, pkt.total);
-                                handshakeCompleted = false;
+                                rxState = "IDLE"; // Возвращаемся в IDLE после полной сборки
                             }
                         } else {
                             log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key!`);
