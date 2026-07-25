@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Fast Acoustic Modem (High Throughput)</title>
+    <title>Fixed High-Reliability Acoustic Modem</title>
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -22,7 +22,7 @@
 </head>
 <body>
 
-    <h2>Ускоренный Акустический Модем (Оптимизированный)</h2>
+    <h2>Надёжный Акустический Модем (Оптимальный Chunk + Быстрый ACK)</h2>
 
     <div class="key-box">
         <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
@@ -31,7 +31,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Быстрая передача с первой попытки за пару секунд!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Передача данных с высокой надёжностью и мгновенным откликом!</textarea>
         <button id="sendBtn">▶ Отправить данные</button>
     </div>
 
@@ -96,7 +96,7 @@
                 "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
             );
             return await window.crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 1000, hash: "SHA-256" }, // Снизили итерации для быстродействия
+                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 1000, hash: "SHA-256" },
                 keyMaterial, { name: "AES-GCM", length: 128 }, false, ["encrypt", "decrypt"]
             );
         }
@@ -167,7 +167,6 @@
                 initGGWave();
                 if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
 
-                // Ставим флаг передачи ДО начала воспроизведения, чтобы микрофон не схавал первый сэмпл!
                 isTransmitting = true;
 
                 var waveform = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10);
@@ -208,7 +207,7 @@
 
         function updateCacheUI() {
             const count = Object.keys(rawReceivedChunks).length;
-            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Пакет в памяти` : "";
+            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Накоплено пакетов: ${count}` : "";
         }
 
         document.getElementById('clearCacheBtn').onclick = () => {
@@ -233,13 +232,13 @@
 
             if (!isListening) await startReceiver();
 
-            // Прогревочный перед передачей, чтобы подготовить микрофон приёмника
-            await sleep(150);
+            // Короткая пауза перед первой отправкой
+            await sleep(200);
 
-            const sessionSalt = getRandomHex(2); // Сократили соль до 2 байт для уменьшения размера пакета
+            const sessionSalt = getRandomHex(2); 
             
-            // Увеличиваем размер чанка до 35 символов (для стандартных фраз будет ВСЕГО 1 ПАКЕТ!)
-            const CHUNK_SIZE = 35; 
+            // Оптимальный размер чанка: 20 символов гарантирует стабильную передачу по воздуху
+            const CHUNK_SIZE = 20; 
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
             log(`[TX] Старт передачи (${totalPackets} пакет(ов))...`);
@@ -248,7 +247,6 @@
                 const rawChunk = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
                 const encryptedChunk = await encryptText(rawChunk, pass, sessionSalt);
 
-                // Максимально сжатый формат JSON: {"i":0,"t":1,"s":"a1","b":"..."}
                 const payload = JSON.stringify({
                     i: i,
                     t: totalPackets,
@@ -259,29 +257,30 @@
                 let delivered = false;
                 let pktAttempts = 0;
 
-                while (!delivered && pktAttempts < 4) {
+                while (!delivered && pktAttempts < 5) {
                     pktAttempts++;
                     log(`[TX] Отправка пакета #${i + 1}/${totalPackets} (попытка ${pktAttempts})...`);
                     
-                    await emitAudioSignal(payload, 200);
+                    await emitAudioSignal(payload, 250);
 
-                    const ack = await waitForSignal(`ACK:${i}`, 2500);
+                    const ack = await waitForSignal(`ACK:${i}`, 3000);
                     if (ack) {
                         log(`[TX] Успех! Получен ACK:${i}`);
                         delivered = true;
+                        await sleep(150);
                     } else {
                         log(`[TX] Таймаут ACK:${i}, повтор...`);
-                        await sleep(150);
+                        await sleep(200);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] ОШИБКА: Пакет #${i + 1} не доставлен.`);
+                    log(`[TX] ОШИБКА: Пакет #${i + 1} застрял. Передача прервана.`);
                     return;
                 }
             }
 
-            log(`[TX] ГОТОВО! Передача завершена.`);
+            log(`[TX] ГОТОВО! Все пакеты доставлены.`);
         };
 
         function waitForSignal(type, timeoutMs) {
@@ -357,7 +356,7 @@
         async function handleIncomingSignal(rawStr) {
             if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-            // 1. Проверка ACK
+            // 1. Проверка ACK (для передатчика)
             if (rawStr.includes("ACK:")) {
                 const parts = rawStr.split("ACK:");
                 pendingSignal = { type: `ACK:${parts[1].trim()}` };
@@ -377,8 +376,8 @@
 
                         document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(rawReceivedChunks).length} / ${pkt.t}`;
 
-                        // Мгновенный ACK отклик (100 мс пауза)
-                        await sleep(100);
+                        // Мгновенный ACK отклик
+                        await sleep(150);
                         await emitAudioSignal(`ACK:${pkt.i}`, 400);
 
                         if (Object.keys(rawReceivedChunks).length === pkt.t) {
@@ -387,7 +386,7 @@
                         }
                     }
                 } catch (e) {
-                    log(`[RX] Битый сигнал: ${e.message}`);
+                    log(`[RX] Ошибка распознавания кадра: ${e.message}`);
                 }
             }
         }
