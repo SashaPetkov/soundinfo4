@@ -3,52 +3,58 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Самодельный M-FSK Модем</title>
+    <title>M-FSK Аудио Модем</title>
     <style>
         body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
-        textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; }
-        button { padding: 10px 15px; margin: 5px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; }
+        textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
+        button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
-        .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 4px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 150px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; }
-        .status { font-weight: bold; color: #ce9178; }
+        .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
+        #log { background: #111; padding: 10px; height: 160px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
+        .monitor { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>M-FSK 16 Аудио Модем (100% Native JS)</h2>
+    <h2>M-FSK 16 Аудио Модем</h2>
 
     <div class="box">
-        <h3>1. Передатчик</h3>
-        <textarea id="inputText" placeholder="Введите текст для передачи...">Привет, M-FSK!</textarea>
-        <button id="sendBtn">▶ Сформировать и отправить звук</button>
+        <h3>1. Передатчик (TX)</h3>
+        <textarea id="inputText" placeholder="Введите текст...">Привет!</textarea>
+        <button id="sendBtn">▶ Отправить звук</button>
     </div>
 
     <div class="box">
-        <h3>2. Приёмник</h3>
+        <h3>2. Приёмник (RX)</h3>
         <button id="listenBtn">🎙 Включить микрофон</button>
         <span id="listenStatus" class="status">Выключен</span>
+        
+        <div class="monitor">
+            Частота: <span id="freqVal">0</span> Гц | Громкость: <span id="dbVal">-100</span> dB
+        </div>
+
         <h4>Полученный текст:</h4>
         <textarea id="outputText" readonly></textarea>
     </div>
 
     <div class="box">
-        <h4>Лог детектора частот:</h4>
+        <h4>Лог детектора:</h4>
         <div id="log"></div>
     </div>
 
     <script>
         // --- НАСТРОЙКИ МОДЕМА ---
-        const BASE_FREQ = 1200;   // Минимальная частота (Гц)
-        const STEP_FREQ = 100;    // Шаг между тонами (Гц)
-        const FREQ_START = 1000;  // Маркер начала кадра
-        const FREQ_END = 2800;    // Маркер конца кадра
+        const BASE_FREQ = 1200;   // Базовая частота
+        const STEP_FREQ = 120;    // Шаг между тонами (Гц)
+        const FREQ_START = 900;   // Маркер начала
+        const FREQ_END = 3100;    // Маркер конца
         
-        // 16 частот для данных (от 1200 до 2700 Гц)
+        // 16 частот для данных (от 1200 до 3000 Гц)
         const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ);
 
-        const TONE_DURATION = 0.06; // Длительность одного тона (60 мс)
-        const PAUSE_DURATION = 0.01; // Пауза между тонами (10 мс)
+        const TONE_DURATION = 0.08;  // Длительность тона (80 мс)
+        const PAUSE_DURATION = 0.02; // Пауза между тонами (20 мс)
 
         let audioCtx = null;
         let isListening = false;
@@ -77,31 +83,27 @@
             const text = document.getElementById('inputText').value;
             if (!text) return;
 
-            // Кодируем текст в массив байт (UTF-8)
             const encoder = new TextEncoder();
             const bytes = encoder.encode(text);
 
-            // Собираем последовательность частот
             const sequence = [];
-
-            // Преамбула (Маркер начала)
+            
+            // Стартовый маркер (дублируем для надежности)
             sequence.push(FREQ_START, FREQ_START);
 
-            // Каждая байт разбивается на два 4-битных ниббла (high и low)
+            // Кодирование байт в нибблы
             for (let b of bytes) {
                 const highNibble = (b >> 4) & 0x0F;
                 const lowNibble = b & 0x0F;
-
                 sequence.push(DATA_FREQS[highNibble]);
                 sequence.push(DATA_FREQS[lowNibble]);
             }
 
-            // Маркер конца
+            // Стоповый маркер
             sequence.push(FREQ_END, FREQ_END);
 
-            log(`[TX] Отправка ${bytes.length} байт (${sequence.length} тонов)...`);
+            log(`[TX] Передача ${bytes.length} байт (${sequence.length} тонов)...`);
 
-            // Воспроизведение
             let startTime = ctx.currentTime + 0.1;
 
             for (let freq of sequence) {
@@ -111,7 +113,7 @@
                 osc.frequency.setValueAtTime(freq, startTime);
                 osc.type = 'sine';
 
-                // Сглаживание краев сигнала против щелчков
+                // Плавное нарастание и затухание против щелчков
                 gain.gain.setValueAtTime(0, startTime);
                 gain.gain.linearRampToValueAtTime(0.3, startTime + 0.005);
                 gain.gain.setValueAtTime(0.3, startTime + TONE_DURATION - 0.005);
@@ -135,15 +137,23 @@
 
             const ctx = getAudioContext();
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                // Отключаем обработку звука ОС, чтобы не резались писки
+                const stream = await navigator.mediaDevices.getUserMedia({ 
+                    audio: {
+                        echoCancellation: false,
+                        noiseSuppression: false,
+                        autoGainControl: false
+                    } 
+                });
+
                 isListening = true;
                 document.getElementById('listenStatus').innerText = "Слушаю...";
                 document.getElementById('listenStatus').style.color = "#4ec9b0";
 
                 const source = ctx.createMediaStreamSource(stream);
                 const analyser = ctx.createAnalyser();
-                analyser.fftSize = 2048; // Точность анализа частоты
-                analyser.smoothingTimeConstant = 0.2; // Быстрый отклик
+                analyser.fftSize = 4096; // Высшее разрешение по частоте
+                analyser.smoothingTimeConstant = 0.1;
                 source.connect(analyser);
 
                 const bufferLength = analyser.frequencyBinCount;
@@ -154,12 +164,14 @@
                 let lastDetectedNibble = -1;
                 let sameNibbleCount = 0;
 
+                const freqValEl = document.getElementById('freqVal');
+                const dbValEl = document.getElementById('dbVal');
+
                 function processAudio() {
                     if (!isListening) return;
 
                     analyser.getFloatFrequencyData(dataArray);
 
-                    // Поиск доминирующей частоты в спектре
                     let maxDb = -Infinity;
                     let maxIndex = -1;
 
@@ -170,35 +182,36 @@
                         }
                     }
 
-                    // Перевод индекса FFT в Гц
+                    // Точный расчет частоты с учетом текущего sampleRate устройства
                     const detectedFreq = maxIndex * (ctx.sampleRate / analyser.fftSize);
 
-                    // Проверяем, достаточно ли громкий сигнал (выше уровня шума)
-                    if (maxDb > -65) { 
+                    freqValEl.innerText = Math.round(detectedFreq);
+                    dbValEl.innerText = Math.round(maxDb);
+
+                    // Порог громкости для отсечения тишины
+                    if (maxDb > -75) { 
                         
-                        // Детекция СТАРТА
-                        if (!receiving && Math.abs(detectedFreq - FREQ_START) < 40) {
+                        // ДЕТЕКЦИЯ СТАРТА
+                        if (!receiving && Math.abs(detectedFreq - FREQ_START) < 50) {
                             receiving = true;
                             rxBuffer = [];
-                            log("[RX] Обнаружен старт передачи!");
+                            log("[RX] Обнаружен старт!");
                         }
 
-                        // Детекция СТОПА
-                        else if (receiving && Math.abs(detectedFreq - FREQ_END) < 40) {
+                        // ДЕТЕКЦИЯ СТОПА
+                        else if (receiving && Math.abs(detectedFreq - FREQ_END) < 50) {
                             receiving = false;
                             log("[RX] Конец передачи.");
                             decodeBuffer(rxBuffer);
                         }
 
-                        // Детекция ДАННЫХ
+                        // ДЕТЕКЦИЯ ДАННЫХ
                         else if (receiving) {
-                            // Ищем ближайшую из 16 частот
                             for (let i = 0; i < 16; i++) {
-                                if (Math.abs(detectedFreq - DATA_FREQS[i]) < 35) {
-                                    // Защита от дребезга (получаем подтверждение тона в нескольких кадрах)
+                                if (Math.abs(detectedFreq - DATA_FREQS[i]) < 45) {
                                     if (i === lastDetectedNibble) {
                                         sameNibbleCount++;
-                                        if (sameNibbleCount === 2) { // Фиксируем значение
+                                        if (sameNibbleCount === 1) { 
                                             rxBuffer.push(i);
                                         }
                                     } else {
@@ -217,15 +230,13 @@
                 processAudio();
 
             } catch (err) {
-                alert("Ошибка доступа к микрофону: " + err);
+                alert("Ошибка микрофона: " + err);
             }
         };
 
-        // Декодирование принятых 4-битных нибблов обратно в байты и текст
         function decodeBuffer(nibbles) {
             log(`[RX] Принято нибблов: ${nibbles.length}`);
             
-            // Если количество нечетное, отбрасываем последний потерянный фрагмент
             if (nibbles.length % 2 !== 0) nibbles.pop();
 
             const bytes = [];
@@ -238,7 +249,7 @@
             const decodedString = decoder.decode(new Uint8Array(bytes));
             
             document.getElementById('outputText').value = decodedString;
-            log(`[RX] Успешно расшифровано: "${decodedString}"`);
+            log(`[RX] Результат: "${decodedString}"`);
         }
     </script>
 </body>
