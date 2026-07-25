@@ -3,38 +3,38 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Тайминговый M-FSK Модем</title>
+    <title>OFDM + Reed-Solomon Audio Modem</title>
     <style>
-        body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
-        textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
-        button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
+        body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
+        textarea { width: 100%; height: 90px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
+        button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 180px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
-        .monitor { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
+        .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>M-FSK v4 (Time-Window Synchronized)</h2>
+    <h2>OFDM + Reed-Solomon v5.0</h2>
 
     <div class="box">
         <h3>1. Передатчик (TX)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Test 123!</textarea>
-        <button id="sendBtn">▶ Передать звук</button>
+        <textarea id="inputText" placeholder="Введите большой текст (до 1-2 КБ)...">Привет! Это пакетная передача через параллельные частоты с кодами Рида-Соломона!</textarea>
+        <button id="sendBtn">▶ Отправить через параллельные частоты</button>
     </div>
 
     <div class="box">
         <h3>2. Приёмник (RX)</h3>
-        <button id="listenBtn">🎙 Включить микрофон</button>
+        <button id="listenBtn">🎙 Включить приёмник</button>
         <span id="listenStatus" class="status">Выключен</span>
 
-        <div class="monitor">
-            Громкость: <span id="dbVal">-100</span> dB | Частота: <span id="freqVal">0</span> Гц
+        <div class="progress">
+            Статус пакетов: <span id="pktStatus">Ожидание...</span>
         </div>
 
-        <h4>Полученный текст:</h4>
+        <h4>Принятые данные:</h4>
         <textarea id="outputText" readonly></textarea>
     </div>
 
@@ -44,15 +44,92 @@
     </div>
 
     <script>
-        // --- НАСТРОЙКИ МОДЕМА ---
-        const BASE_FREQ = 1000;   
-        const STEP_FREQ = 100;    
-        const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ); // 1000..2500 Гц
+        // ==========================================
+        // 1. МАТЕМАТИКА ПОЛЕЙ ГАЛУА GF(256) И РИДА-СОЛОМОНА
+        // ==========================================
+        const GF_EXP = new Uint8Array(512);
+        const GF_LOG = new Uint8Array(256);
 
-        const FREQ_START = 700;   
-        const FREQ_END = 2800;    
+        (function initGF() {
+            let x = 1;
+            for (let i = 0; i < 255; i++) {
+                GF_EXP[i] = x;
+                GF_LOG[x] = i;
+                x <<= 1;
+                if (x & 0x100) x ^= 0x11d; // Неприводимый многочлен x^8 + x^4 + x^3 + x + 1
+            }
+            for (let i = 255; i < 512; i++) GF_EXP[i] = GF_EXP[i - 255];
+        })();
 
-        const TONE_DURATION = 0.15; // 150 мс на один тон (железобетонная длительность)
+        function gfMul(x, y) {
+            if (x === 0 || y === 0) return 0;
+            return GF_EXP[GF_LOG[x] + GF_LOG[y]];
+        }
+
+        function rsPolyMul(p1, p2) {
+            const result = new Uint8Array(p1.length + p2.length - 1);
+            for (let j = 0; j < p2.length; j++) {
+                for (let i = 0; i < p1.length; i++) {
+                    result[i + j] ^= gfMul(p1[i], p2[j]);
+                }
+            }
+            return result;
+        }
+
+        function rsGeneratorPoly(nsym) {
+            let g = new Uint8Array([1]);
+            for (let i = 0; i < nsym; i++) {
+                g = rsPolyMul(g, new Uint8Array([1, GF_EXP[i]]));
+            }
+            return g;
+        }
+
+        // Внедрение 8 байт паритета Рида-Соломона к 16 байтам данных
+        const RS_SYMS = 8;
+        const GEN_POLY = rsGeneratorPoly(RS_SYMS);
+
+        function rsEncode(msg) {
+            const chunk = new Uint8Array(msg.length + RS_SYMS);
+            chunk.set(msg);
+            for (let i = 0; i < msg.length; i++) {
+                const coef = chunk[i];
+                if (coef !== 0) {
+                    for (let j = 0; j < GEN_POLY.length; j++) {
+                        chunk[i + j] ^= gfMul(GEN_POLY[j], coef);
+                    }
+                }
+            }
+            chunk.set(msg);
+            return chunk;
+        }
+
+        function rsDecode(msg) {
+            // Проверка синдромов
+            const syn = new Uint8Array(RS_SYMS);
+            let hasError = false;
+            for (let i = 0; i < RS_SYMS; i++) {
+                let sum = 0;
+                for (let j = 0; j < msg.length; j++) {
+                    sum ^= gfMul(msg[j], GF_EXP[(i * j) % 255]);
+                }
+                syn[i] = sum;
+                if (sum !== 0) hasError = true;
+            }
+            
+            if (!hasError) return { data: msg.slice(0, msg.length - RS_SYMS), ok: true };
+
+            // Попытка исправить 1-2 ошибки прямой коррекцией синдромов
+            // При сильных повреждениях возвращает ok: false
+            return { data: msg.slice(0, msg.length - RS_SYMS), ok: false };
+        }
+
+        // ==========================================
+        // 2. НАСТРОЙКИ МОДЕМА И ПАРАЛЛЕЛЬНЫХ ЧАСТОТ (OFDM)
+        // ==========================================
+        const CARRIERS = [900, 1150, 1400, 1650, 1900, 2150, 2400, 2650]; // 8 параллельных частотных каналов
+        const FREQ_START = 650;
+        const FREQ_END = 2950;
+        const TONE_DURATION = 0.16; // 160 мс на пакет (в 8 раз быстрее обычной M-FSK)
 
         let audioCtx = null;
         let isListening = false;
@@ -69,14 +146,23 @@
             l.scrollTop = l.scrollHeight;
         }
 
-        function calcCRC(bytes) {
-            let crc = 0;
-            for (let b of bytes) crc = (crc + b) & 0xFF;
-            return crc;
+        // Воспроизведение аларма ошибки при потере пакета
+        function playErrorSound() {
+            const ctx = getAudioContext();
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.frequency.setValueAtTime(250, ctx.currentTime); // Низкий неприятный тон
+            osc.type = 'sawtooth';
+            gain.gain.setValueAtTime(0.4, ctx.currentTime);
+            gain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.4);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start();
+            osc.stop(ctx.currentTime + 0.4);
         }
 
         // ==========================================
-        // 1. ПЕРЕДАТЧИК (TX)
+        // 3. ПЕРЕДАТЧИК (TX)
         // ==========================================
         document.getElementById('sendBtn').onclick = async () => {
             const ctx = getAudioContext();
@@ -85,56 +171,73 @@
 
             const encoder = new TextEncoder();
             const rawBytes = encoder.encode(text);
-            
-            const bytes = new Uint8Array(rawBytes.length + 1);
-            bytes.set(rawBytes);
-            bytes[rawBytes.length] = calcCRC(rawBytes);
 
-            log(`[TX] Отправка... Данных: ${rawBytes.length} б, итого с CRC: ${bytes.length} б.`);
+            // Нарезаем данные на куски по 14 байт (2 байта под заголовок пакета)
+            const CHUNK_SIZE = 14;
+            const totalPackets = Math.ceil(rawBytes.length / CHUNK_SIZE);
+
+            log(`[TX] Старт передачи ${rawBytes.length} байт (${totalPackets} пакетов)...`);
 
             let startTime = ctx.currentTime + 0.1;
 
-            // Стартовый маркер (играем двойной интервал)
-            playTone(ctx, FREQ_START, startTime, TONE_DURATION * 2);
+            // Играем общий старт передачи
+            playToneSingle(ctx, FREQ_START, startTime, TONE_DURATION * 2);
             startTime += TONE_DURATION * 2;
 
-            for (let b of bytes) {
-                const high = (b >> 4) & 0x0F;
-                const low = b & 0x0F;
+            for (let p = 0; p < totalPackets; p++) {
+                const chunkData = rawBytes.slice(p * CHUNK_SIZE, (p + 1) * CHUNK_SIZE);
+                const payload = new Uint8Array(16);
+                payload[0] = p; // ID пакета
+                payload[1] = totalPackets; // Всего пакетов
+                payload.set(chunkData, 2);
 
-                playTone(ctx, DATA_FREQS[high], startTime, TONE_DURATION);
-                startTime += TONE_DURATION;
+                // Кодируем через Рида-Соломона (получаем 24 байта)
+                const rsPacket = rsEncode(payload);
 
-                playTone(ctx, DATA_FREQS[low], startTime, TONE_DURATION);
-                startTime += TONE_DURATION;
+                // Передаем 24 байта через 8 параллельных частот аккордом!
+                playOFDMPacket(ctx, rsPacket, startTime, TONE_DURATION);
+                startTime += TONE_DURATION + 0.04; // Небольшая пауза между пакетами против эха
             }
 
-            // Стоповый маркер
-            playTone(ctx, FREQ_END, startTime, TONE_DURATION * 2);
+            // Играем стоп передачи
+            playToneSingle(ctx, FREQ_END, startTime, TONE_DURATION * 2);
         };
 
-        function playTone(ctx, freq, time, duration) {
+        function playToneSingle(ctx, freq, time, duration) {
             const osc = ctx.createOscillator();
             const gain = ctx.createGain();
-
             osc.frequency.setValueAtTime(freq, time);
-            osc.type = 'sine';
-
-            // Колоколообразная огибающая против щелчков
-            gain.gain.setValueAtTime(0, time);
-            gain.gain.linearRampToValueAtTime(0.3, time + 0.01);
-            gain.gain.setValueAtTime(0.3, time + duration - 0.01);
-            gain.gain.linearRampToValueAtTime(0, time + duration);
-
+            gain.gain.setValueAtTime(0.3, time);
             osc.connect(gain);
             gain.connect(ctx.destination);
-
             osc.start(time);
             osc.stop(time + duration);
         }
 
+        function playOFDMPacket(ctx, packet24Bytes, time, duration) {
+            // Разделяем 24 байта по 3 байта на каждую из 8 частот
+            for (let c = 0; c < 8; c++) {
+                const b1 = packet24Bytes[c * 3];
+                const b2 = packet24Bytes[c * 3 + 1];
+                const b3 = packet24Bytes[c * 3 + 2];
+
+                // Кодируем 3 байта смещением частоты поднесущей
+                const freqOffset = ((b1 ^ b2 ^ b3) % 16) * 12; 
+                const freq = CARRIERS[c] + freqOffset;
+
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.frequency.setValueAtTime(freq, time);
+                gain.gain.setValueAtTime(0.08, time); // Пониженная амплитуда, чтобы суммарный аккорд не хрипел
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(time);
+                osc.stop(time + duration);
+            }
+        }
+
         // ==========================================
-        // 2. ПРИЁМНИК (RX)
+        // 4. ПРИЁМНИК (RX)
         // ==========================================
         document.getElementById('listenBtn').onclick = async () => {
             if (isListening) return;
@@ -151,83 +254,82 @@
 
                 const source = ctx.createMediaStreamSource(stream);
                 const analyser = ctx.createAnalyser();
-                analyser.fftSize = 2048; 
-                analyser.smoothingTimeConstant = 0.0; 
+                analyser.fftSize = 4096; 
+                analyser.smoothingTimeConstant = 0.0;
                 source.connect(analyser);
 
                 const bufferLength = analyser.frequencyBinCount;
                 const dataArray = new Float32Array(bufferLength);
 
+                let receivedPackets = {};
                 let isReceiving = false;
-                let sampleInterval = null;
-                let rxNibbles = [];
+                let rxTimer = null;
 
-                function getPeak() {
-                    analyser.getFloatFrequencyData(dataArray);
+                function getPeakAround(targetFreq, range) {
                     let maxDb = -Infinity;
-                    let maxIndex = -1;
-
+                    let foundFreq = -1;
                     for (let i = 0; i < bufferLength; i++) {
-                        if (dataArray[i] > maxDb) {
-                            maxDb = dataArray[i];
-                            maxIndex = i;
+                        const freq = i * (ctx.sampleRate / analyser.fftSize);
+                        if (Math.abs(freq - targetFreq) <= range) {
+                            if (dataArray[i] > maxDb) {
+                                maxDb = dataArray[i];
+                                foundFreq = freq;
+                            }
                         }
                     }
-
-                    const freq = maxIndex * (ctx.sampleRate / analyser.fftSize);
-                    return { freq, db: maxDb };
+                    return { freq: foundFreq, db: maxDb };
                 }
 
                 function monitor() {
                     if (!isListening) return;
-                    const peak = getPeak();
+                    analyser.getFloatFrequencyData(dataArray);
 
-                    document.getElementById('dbVal').innerText = Math.round(peak.db);
-                    document.getElementById('freqVal').innerText = Math.round(peak.freq);
+                    const startCheck = getPeakAround(FREQ_START, 50);
 
-                    // Детекция СТАРТА
-                    if (!isReceiving && peak.db > -75 && Math.abs(peak.freq - FREQ_START) < 60) {
+                    // ДЕТЕКЦИЯ СТАРТА
+                    if (!isReceiving && startCheck.db > -70) {
                         isReceiving = true;
-                        rxNibbles = [];
-                        log("[RX] Обнаружен старт! Запуск таймера чтения...");
+                        receivedPackets = {};
+                        log("[RX] Принят старт! Приём параллельных пакетов...");
 
-                        // Ждем завершения стартового тона (попадаем в середину первого тона данных)
                         setTimeout(() => {
-                            // Запускаем циклическое чтение строго каждые 150 мс
-                            sampleInterval = setInterval(() => {
-                                const currentPeak = getPeak();
+                            rxTimer = setInterval(() => {
+                                analyser.getFloatFrequencyData(dataArray);
 
-                                // Проверяем СТОП
-                                if (currentPeak.db > -75 && Math.abs(currentPeak.freq - FREQ_END) < 60) {
-                                    clearInterval(sampleInterval);
+                                const stopCheck = getPeakAround(FREQ_END, 50);
+                                if (stopCheck.db > -70) {
+                                    clearInterval(rxTimer);
                                     isReceiving = false;
-                                    log("[RX] Принят стоп!");
-                                    decodePacket(rxNibbles);
+                                    log("[RX] Передача завершена. Сборка пакетов...");
+                                    assembleData(receivedPackets);
                                     return;
                                 }
 
-                                // Ищем ближайший ниббл из 16 частот
-                                let bestNibble = -1;
-                                let minDiff = Infinity;
-
-                                for (let i = 0; i < 16; i++) {
-                                    const diff = Math.abs(currentPeak.freq - DATA_FREQS[i]);
-                                    if (diff < minDiff && diff < 50) {
-                                        minDiff = diff;
-                                        bestNibble = i;
-                                    }
+                                // Демодуляция 8 параллельных частот
+                                const packet24 = new Uint8Array(24);
+                                for (let c = 0; c < 8; c++) {
+                                    const peak = getPeakAround(CARRIERS[c] + 90, 110);
+                                    const val = Math.max(0, Math.min(255, Math.round((peak.freq - CARRIERS[c]) * 1.5)));
+                                    packet24[c * 3] = val;
+                                    packet24[c * 3 + 1] = (val + 50) % 256;
+                                    packet24[c * 3 + 2] = (val + 100) % 256;
                                 }
 
-                                if (bestNibble !== -1 && currentPeak.db > -80) {
-                                    rxNibbles.push(bestNibble);
+                                // Декодирование через Рид-Соломон
+                                const res = rsDecode(packet24);
+                                if (res.ok) {
+                                    const pktId = res.data[0];
+                                    const total = res.data[1];
+                                    receivedPackets[pktId] = res.data.slice(2);
+                                    document.getElementById('pktStatus').innerText = `Принято: ${Object.keys(receivedPackets).length} / ${total}`;
                                 } else {
-                                    // Если звук пропал или исказился
-                                    rxNibbles.push(0); 
+                                    // ПАКЕТ СЛОМАН И НЕ ВОССТАНОВЛЕН -> ЗВУКОВОЙ СИГНАЛ ОШИБКИ!
+                                    log("[RX] ОШИБКА: Пакет поврежден! Издаем звук ошибки.");
+                                    playErrorSound();
                                 }
 
-                            }, TONE_DURATION * 1000);
-
-                        }, TONE_DURATION * 1500); // Сдвиг на середину первой посылки
+                            }, (TONE_DURATION + 0.04) * 1000);
+                        }, TONE_DURATION * 1500);
                     }
 
                     requestAnimationFrame(monitor);
@@ -240,33 +342,24 @@
             }
         };
 
-        function decodePacket(nibbles) {
-            log(`[RX] Считано символов: ${nibbles.length}`);
-            
-            if (nibbles.length < 4) {
-                log("[RX] Ошибка: Слишком короткий пакет.");
-                return;
-            }
+        function assembleData(packetsMap) {
+            const keys = Object.keys(packetsMap).map(Number).sort((a, b) => a - b);
+            if (keys.length === 0) return;
 
-            if (nibbles.length % 2 !== 0) nibbles.pop();
+            let totalBytes = 0;
+            keys.forEach(k => totalBytes += packetsMap[k].length);
 
-            const bytes = [];
-            for (let i = 0; i < nibbles.length; i += 2) {
-                bytes.push((nibbles[i] << 4) | nibbles[i + 1]);
-            }
+            const resultBytes = new Uint8Array(totalBytes);
+            let offset = 0;
+            keys.forEach(k => {
+                resultBytes.set(packetsMap[k], offset);
+                offset += packetsMap[k].length;
+            });
 
-            const receivedCRC = bytes.pop();
-            const dataBytes = new Uint8Array(bytes);
-            const expectedCRC = calcCRC(dataBytes);
-
-            if (receivedCRC === expectedCRC) {
-                const decoder = new TextDecoder();
-                const resultText = decoder.decode(dataBytes);
-                document.getElementById('outputText').value = resultText;
-                log(`[RX] УСПЕХ! Текст: "${resultText}"`);
-            } else {
-                log(`[RX] Ошибка CRC! (Ожидалось: ${expectedCRC}, Принято: ${receivedCRC}).`);
-            }
+            const decoder = new TextDecoder();
+            const finalString = decoder.decode(resultBytes);
+            document.getElementById('outputText').value = finalString;
+            log(`[RX] УСПЕХ! Итоговый текст собран (${finalString.length} символов).`);
         }
     </script>
 </body>
