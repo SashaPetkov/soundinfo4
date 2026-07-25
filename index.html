@@ -3,26 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Acoustic Modem with ACK Protocol</title>
-    <script src="https://ggwave.js.org/ggwave.js"></script>
+    <title>Acoustic Link (GGWave + ACK)</title>
+    <!-- Локальное подключение ggwave.js -->
+    <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
         textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
         button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 220px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
         .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>Звуковой Модем с Протоколом Подтверждения (ACK)</h2>
+    <h2>Acoustic Modem (GGWave + ACK Protocol)</h2>
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите большой текст...">Привет! Это проверка полноценного транспортного протокола. Данные режутся на чанки, передаются через GGWave, а приёмник подтверждает получение каждого пакета сигналом ACK.</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Привет! Это проверка полноценного протокола с нарезкой пакетов и подлинными вызовами GGWave.</textarea>
         <button id="sendBtn">▶ Отправить с гарантией доставки</button>
     </div>
 
@@ -45,10 +46,19 @@
     </div>
 
     <script>
-        let ggwaveInstance = null;
-        let audioCtx = null;
+        window.AudioContext = window.AudioContext || window.webkitAudioContext;
+
+        let context = null;
+        let recorder = null;
+        let mediaStream = null;
+
+        let ggwave = null;
+        let parameters = null;
+        let instance = null;
+
         let isListening = false;
-        let instanceId = null;
+        let pendingAck = null;
+        let receivedChunks = {};
 
         function log(msg) {
             const l = document.getElementById('log');
@@ -56,61 +66,88 @@
             l.scrollTop = l.scrollHeight;
         }
 
-        window.onload = async () => {
-            log("[System] Инициализация ядра GGWave...");
-            ggwaveFactory().then((instance) => {
-                ggwaveInstance = instance;
-                log("[System] Ядро GGWave готово.");
+        // Хелпер-конвертер типов массива как в официальном примере
+        function convertTypedArray(src, type) {
+            var buffer = new ArrayBuffer(src.byteLength);
+            new src.constructor(buffer).set(src);
+            return new type(buffer);
+        }
+
+        // Инициализация WASM модуля ggwave (работает через локальный ggwave.js и ggwave.wasm)
+        window.onload = function() {
+            log("[System] Загрузка локального ядра GGWave...");
+            
+            if (typeof ggwave_factory === 'undefined') {
+                log("[Error] Ошибка: ggwave.js не подключен!");
+                return;
+            }
+
+            ggwave_factory({
+                locateFile: (path) => path.endsWith('.wasm') ? 'ggwave.wasm' : path
+            }).then(function(obj) {
+                ggwave = obj;
+                log("[System] Ядро GGWave инициализировано.");
+            }).catch(err => {
+                log("[Error] Ошибка загрузки WASM: " + err);
             });
         };
 
-        function getAudioContext() {
-            if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-            if (audioCtx.state === 'suspended') audioCtx.resume();
-            return audioCtx;
+        // Инициализация AudioContext и параметров GGWave
+        function initGGWave() {
+            if (!context) {
+                context = new AudioContext({ sampleRate: 48000 });
+
+                parameters = ggwave.getDefaultParameters();
+                parameters.sampleRateInp = context.sampleRate;
+                parameters.sampleRateOut = context.sampleRate;
+                instance = ggwave.init(parameters);
+                
+                log("[System] AudioContext и экземпляр GGWave созданы.");
+            }
+            if (context.state === 'suspended') {
+                context.resume();
+            }
         }
 
-        // Вспомогательная функция для генерации звука через GGWave
+        // Вспомогательная функция отправки звука (из официального примера)
         function emitAudioSignal(text) {
-            const ctx = getAudioContext();
-            const waveform = ggwaveInstance.encode(
-                text, 
-                ggwaveInstance.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 
-                10
-            );
+            initGGWave();
 
-            const buf = ctx.createBuffer(1, waveform.length, ctx.sampleRate);
-            buf.getChannelData(0).set(waveform);
+            // Кодируем с верными аргументами: (instance, data, protocol, volume)
+            var waveform = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10);
 
-            const source = ctx.createBufferSource();
-            source.buffer = buf;
-            source.connect(ctx.destination);
-            source.start();
+            var buf = convertTypedArray(waveform, Float32Array);
+            var buffer = context.createBuffer(1, buf.length, context.sampleRate);
+            buffer.getChannelData(0).set(buf);
+
+            var source = context.createBufferSource();
+            source.buffer = buffer;
+            source.connect(context.destination);
+            source.start(0);
         }
 
         // ==========================================
         // 1. ЛОГИКА ПЕРЕДАТЧИКА (TX)
         // ==========================================
-        let pendingAck = null;
-
         document.getElementById('sendBtn').onclick = async () => {
-            if (!ggwaveInstance) { alert("Ядро ещё не загрузилось!"); return; }
-            const ctx = getAudioContext();
+            if (!ggwave || !instance && !context) {
+                initGGWave();
+            }
+            
             const text = document.getElementById('inputText').value;
             if (!text) return;
 
-            // Включаем микрофон передатчика, чтобы он мог слушать ответы ACK от приёмника
-            if (!isListening) await startReceiver(ctx);
+            // Если захват звука не включен, включаем слушатель ответов
+            if (!isListening) await startReceiver();
 
-            const CHUNK_SIZE = 40; // Размер одного пакета в символах
+            const CHUNK_SIZE = 35;
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
-            log(`[TX] Начинаем передачу. Всего пакетов: ${totalPackets}`);
+            log(`[TX] Начинаем передачу ${totalPackets} пакетов...`);
 
             for (let i = 0; i < totalPackets; i++) {
                 const chunkText = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
                 
-                // Формируем служебный каст
                 const payload = JSON.stringify({
                     id: i,
                     total: totalPackets,
@@ -126,21 +163,20 @@
                     
                     emitAudioSignal(payload);
 
-                    // Ждём ACK-сигнал от приёмника
                     const ackReceived = await waitForAck(i, 2500);
 
                     if (ackReceived) {
-                        log(`[TX] Получен ACK:${i}! Пакет успешно доставлен.`);
+                        log(`[TX] Получен ACK:${i}! Пакет доставлен.`);
                         delivered = true;
-                        await sleep(300); // Пауза перед следующим пакетом
+                        await sleep(300);
                     } else {
-                        log(`[TX] Таймаут ожидания ACK:${i}. Повторная отправка...`);
+                        log(`[TX] Таймаут ожидания ACK:${i}. Повтор...`);
                         await sleep(500);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] ОШИБКА: Не удалось доставить пакет #${i} за 5 попыток.`);
+                    log(`[TX] ОШИБКА: Не удалось доставить пакет #${i}.`);
                     return;
                 }
             }
@@ -173,41 +209,51 @@
         // ==========================================
         // 2. ЛОГИКА ПРИЁМНИКА (RX)
         // ==========================================
-        let receivedChunks = {};
-
         document.getElementById('listenBtn').onclick = async () => {
-            if (isListening) return;
-            const ctx = getAudioContext();
-            await startReceiver(ctx);
+            await startReceiver();
         };
 
-        async function startReceiver(ctx) {
+        async function startReceiver() {
+            if (isListening) return;
+            initGGWave();
+
+            let constraints = {
+                audio: {
+                    echoCancellation: false,
+                    autoGainControl: false,
+                    noiseSuppression: false
+                }
+            };
+
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({ 
-                    audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false } 
-                });
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
+                mediaStream = context.createMediaStreamSource(stream);
 
-                isListening = true;
-                document.getElementById('listenStatus').innerText = "Слушаю...";
-                document.getElementById('listenStatus').style.color = "#4ec9b0";
+                var bufferSize = 1024;
+                if (context.createScriptProcessor) {
+                    recorder = context.createScriptProcessor(bufferSize, 1, 1);
+                } else {
+                    recorder = context.createJavaScriptNode(bufferSize, 1, 1);
+                }
 
-                const source = ctx.createMediaStreamSource(stream);
-                const recorder = ctx.createScriptProcessor(1024, 1, 1);
-                instanceId = ggwaveInstance.init();
-
-                recorder.onaudioprocess = (e) => {
-                    if (!isListening) return;
-                    const inputData = e.inputBuffer.getChannelData(0);
-                    const res = ggwaveInstance.decode(instanceId, inputData);
+                // В точности как в примере: декодируем куски через Int8Array
+                recorder.onaudioprocess = function (e) {
+                    var source = e.inputBuffer;
+                    var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
 
                     if (res && res.length > 0) {
-                        const rawStr = new TextDecoder().decode(res);
+                        const rawStr = new TextDecoder("utf-8").decode(res);
                         handleIncomingSignal(rawStr);
                     }
                 };
 
-                source.connect(recorder);
-                recorder.connect(ctx.destination);
+                mediaStream.connect(recorder);
+                recorder.connect(context.destination);
+
+                isListening = true;
+                document.getElementById('listenStatus').innerText = "Слушаю...";
+                document.getElementById('listenStatus').style.color = "#4ec9b0";
+                log("[RX] Микрофон успешно активирован.");
 
             } catch (err) {
                 alert("Ошибка доступа к микрофону: " + err);
@@ -215,36 +261,30 @@
         }
 
         function handleIncomingSignal(rawStr) {
-            // Проверяем, не служебный ли это ACK-сигнал
             if (rawStr.startsWith("ACK:")) {
                 const ackId = parseInt(rawStr.split(":")[1], 10);
-                log(`[RX/TX Listener] Пойман сигнал ACK:${ackId}`);
+                log(`[RX/TX Listener] Пойман ответ ACK:${ackId}`);
                 pendingAck = ackId;
                 return;
             }
 
-            // Пробуем распарсить пакет данных
             try {
                 const pkt = JSON.parse(rawStr);
                 if (pkt && typeof pkt.id === 'number') {
-                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Отправка подтверждения ACK:${pkt.id}...`);
+                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Отправка ACK:${pkt.id}...`);
                     
                     receivedChunks[pkt.id] = pkt.body;
                     document.getElementById('pktStatus').innerText = `Принято: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
 
-                    // Мгновенно отправляем звуковой ACK обратно
                     setTimeout(() => {
                         emitAudioSignal(`ACK:${pkt.id}`);
-                    }, 200);
+                    }, 250);
 
-                    // Если все пакеты собраны — склеиваем результат
                     if (Object.keys(receivedChunks).length === pkt.total) {
                         assembleFinalData(receivedChunks, pkt.total);
                     }
                 }
-            } catch (e) {
-                // Игнорируем некорректный шум
-            }
+            } catch (e) {}
         }
 
         function assembleFinalData(chunksMap, total) {
