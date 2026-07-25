@@ -3,24 +3,25 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>M-FSK с Тактовой Синхронизацией</title>
+    <title>M-FSK с Тактовой Синхронизацией (Low-Freq)</title>
     <style>
         body { font-family: monospace, sans-serif; max-width: 700px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
         textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
         button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 160px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 180px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
+        .monitor { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
     </style>
 </head>
 <body>
 
-    <h2>M-FSK v3 (Clock Synchronized)</h2>
+    <h2>M-FSK v3.1 (Низкие частоты + Тактовая Синхронизация)</h2>
 
     <div class="box">
         <h3>1. Передатчик (TX)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Hello 123!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Test 123</textarea>
         <button id="sendBtn">▶ Передать звук</button>
     </div>
 
@@ -28,6 +29,10 @@
         <h3>2. Приёмник (RX)</h3>
         <button id="listenBtn">🎙 Включить микрофон</button>
         <span id="listenStatus" class="status">Выключен</span>
+
+        <div class="monitor">
+            Такт: <span id="clockVal">NONE</span> | Дерект данных: <span id="dataVal">-</span> | Громкость: <span id="dbVal">-100</span> dB
+        </div>
 
         <h4>Полученный текст:</h4>
         <textarea id="outputText" readonly></textarea>
@@ -39,19 +44,20 @@
     </div>
 
     <script>
-        // --- НАСТРОЙКИ МОДЕМА ---
-        const BASE_FREQ = 1200;   
-        const STEP_FREQ = 130;    
+        // --- ОБНОВЛЕННЫЕ НАСТРОЙКИ (Сдвиг в наиболее слышимый диапазон) ---
+        const BASE_FREQ = 1000;   
+        const STEP_FREQ = 100;    
+        // 16 частот для данных (от 1000 до 2500 Гц)
         const DATA_FREQS = Array.from({length: 16}, (_, i) => BASE_FREQ + i * STEP_FREQ);
 
-        // Тактовые частоты (Синхронизация)
-        const CLOCK_A = 3600; 
-        const CLOCK_B = 4000; 
+        // Тактовые частоты (2700 и 2900 Гц — отстроены от данных)
+        const CLOCK_A = 2700; 
+        const CLOCK_B = 2900; 
 
-        const FREQ_START = 800;   
-        const FREQ_END = 4500;    
+        const FREQ_START = 700;   
+        const FREQ_END = 3200;    
 
-        const TONE_DURATION = 0.10; // 100 мс на тон
+        const TONE_DURATION = 0.14; // 140 мс для уверенного считывания
 
         let audioCtx = null;
         let isListening = false;
@@ -68,7 +74,7 @@
             l.scrollTop = l.scrollHeight;
         }
 
-        // Простая контрольная сумма (CRC8)
+        // Контрольная сумма CRC8
         function calcCRC(bytes) {
             let crc = 0;
             for (let b of bytes) crc = (crc + b) & 0xFF;
@@ -86,12 +92,12 @@
             const encoder = new TextEncoder();
             const rawBytes = encoder.encode(text);
             
-            // Добавляем контрольную сумму в конец
+            // Добавляем CRC8 байт в конец
             const bytes = new Uint8Array(rawBytes.length + 1);
             bytes.set(rawBytes);
             bytes[rawBytes.length] = calcCRC(rawBytes);
 
-            log(`[TX] Отправка... Байтов (с CRC): ${bytes.length}`);
+            log(`[TX] Отправка... Данных: ${rawBytes.length} б, итого с CRC: ${bytes.length} б.`);
 
             let startTime = ctx.currentTime + 0.1;
 
@@ -121,21 +127,21 @@
         };
 
         function playTone(ctx, dataFreq, clockFreq, time, duration) {
-            // Генератор данных
+            // Канал данных
             const osc1 = ctx.createOscillator();
             const gain1 = ctx.createGain();
             osc1.frequency.setValueAtTime(dataFreq, time);
-            gain1.gain.setValueAtTime(0.2, time);
+            gain1.gain.setValueAtTime(0.25, time);
             osc1.connect(gain1);
             gain1.connect(ctx.destination);
             osc1.start(time);
             osc1.stop(time + duration);
 
-            // Генератор такта (Clock)
+            // Канал такта (Clock)
             const osc2 = ctx.createOscillator();
             const gain2 = ctx.createGain();
             osc2.frequency.setValueAtTime(clockFreq, time);
-            gain2.gain.setValueAtTime(0.15, time);
+            gain2.gain.setValueAtTime(0.18, time);
             osc2.connect(gain2);
             gain2.connect(ctx.destination);
             osc2.start(time);
@@ -171,12 +177,16 @@
                 let receiving = false;
                 let lastClockState = null;
 
+                const clockValEl = document.getElementById('clockVal');
+                const dataValEl = document.getElementById('dataVal');
+                const dbValEl = document.getElementById('dbVal');
+
                 function processAudio() {
                     if (!isListening) return;
 
                     analyser.getFloatFrequencyData(dataArray);
 
-                    // Вспомогательная функция поиска пика возле частоты
+                    // Вспомогательная функция поиска максимальной громкости в диапазоне частот
                     function getPeakFreqAround(targetFreq, range) {
                         let maxDb = -Infinity;
                         let foundFreq = -1;
@@ -192,33 +202,37 @@
                         return { freq: foundFreq, db: maxDb };
                     }
 
-                    // Ищем старт/стоп
-                    const startCheck = getPeakFreqAround(FREQ_START, 50);
-                    const stopCheck = getPeakFreqAround(FREQ_END, 50);
+                    // Проверяем старт / стоп
+                    const startCheck = getPeakFreqAround(FREQ_START, 60);
+                    const stopCheck = getPeakFreqAround(FREQ_END, 60);
 
-                    if (!receiving && startCheck.db > -70) {
+                    dbValEl.innerText = Math.round(Math.max(startCheck.db, stopCheck.db));
+
+                    if (!receiving && startCheck.db > -75) {
                         receiving = true;
                         rxNibbles = [];
                         lastClockState = null;
-                        log("[RX] Старт принят!");
-                    } else if (receiving && stopCheck.db > -70) {
+                        log("[RX] Обнаружен старт!");
+                    } else if (receiving && stopCheck.db > -75) {
                         receiving = false;
-                        log("[RX] Стоп принят!");
+                        log("[RX] Обнаружен стоп!");
                         decodePacket(rxNibbles);
                     } else if (receiving) {
-                        // Определяем текущий такт (Clock A или Clock B)
-                        const clockA = getPeakFreqAround(CLOCK_A, 60);
-                        const clockB = getPeakFreqAround(CLOCK_B, 60);
+                        // Определяем тактовый сигнал
+                        const clockA = getPeakFreqAround(CLOCK_A, 50);
+                        const clockB = getPeakFreqAround(CLOCK_B, 50);
 
                         let currentClock = null;
-                        if (clockA.db > -75 && clockA.db > clockB.db) currentClock = 'A';
-                        else if (clockB.db > -75 && clockB.db > clockA.db) currentClock = 'B';
+                        if (clockA.db > -82 && clockA.db > clockB.db) currentClock = 'A';
+                        else if (clockB.db > -82 && clockB.db > clockA.db) currentClock = 'B';
 
-                        // СМЕНА ТАКТА = новый тон!
+                        clockValEl.innerText = currentClock || 'NONE';
+
+                        // Смена такта фиксирует новый тоновый символ
                         if (currentClock && currentClock !== lastClockState) {
                             lastClockState = currentClock;
 
-                            // Считываем частоту данных
+                            // Считываем частоту из канала данных (16 вариантов)
                             let maxDataDb = -Infinity;
                             let detectedNibble = -1;
 
@@ -230,8 +244,9 @@
                                 }
                             }
 
-                            if (detectedNibble !== -1 && maxDataDb > -75) {
+                            if (detectedNibble !== -1 && maxDataDb > -82) {
                                 rxNibbles.push(detectedNibble);
+                                dataValEl.innerText = detectedNibble.toString(16).toUpperCase();
                             }
                         }
                     }
@@ -242,13 +257,16 @@
                 processAudio();
 
             } catch (err) {
-                alert("Ошибка микрофона: " + err);
+                alert("Ошибка доступа к микрофону: " + err);
             }
         };
 
         function decodePacket(nibbles) {
-            log(`[RX] Всего принятых нибблов: ${nibbles.length}`);
-            if (nibbles.length % 2 !== 0) nibbles.pop();
+            log(`[RX] Всего принятых символов: ${nibbles.length}`);
+            if (nibbles.length % 2 !== 0) {
+                log("[RX] Нечетное кол-во символов, отбрасываем сдвиг.");
+                nibbles.pop();
+            }
 
             const bytes = [];
             for (let i = 0; i < nibbles.length; i += 2) {
@@ -260,7 +278,7 @@
                 return;
             }
 
-            // Отделяем данные от CRC
+            // Отделяем байт CRC от данных
             const receivedCRC = bytes.pop();
             const dataBytes = new Uint8Array(bytes);
             const expectedCRC = calcCRC(dataBytes);
@@ -271,7 +289,7 @@
                 document.getElementById('outputText').value = resultText;
                 log(`[RX] УСПЕХ! CRC совпал. Текст: "${resultText}"`);
             } else {
-                log(`[RX] ОШИБКА CRC! Данные повреждены (Ожидалось ${expectedCRC}, получено ${receivedCRC}).`);
+                log(`[RX] ОШИБКА CRC! (Расчитано: ${expectedCRC}, Принято: ${receivedCRC}). Попробуйте уменьшить громкость на ПК.`);
             }
         }
     </script>
