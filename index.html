@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Acoustic Modem (Late Decryption Architecture)</title>
+    <title>Fast Acoustic Modem (High Throughput)</title>
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -22,7 +22,7 @@
 </head>
 <body>
 
-    <h2>Защищенный Акустический Модем (Сборка -> Расшифровка)</h2>
+    <h2>Ускоренный Акустический Модем (Оптимизированный)</h2>
 
     <div class="key-box">
         <label>🔑 Общий секретный пароль (Pre-Shared Key):</label>
@@ -31,7 +31,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Передача сырых пакетов с итоговой расшифровкой в конце прошла успешно!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Быстрая передача с первой попытки за пару секунд!</textarea>
         <button id="sendBtn">▶ Отправить данные</button>
     </div>
 
@@ -72,7 +72,7 @@
         
         let currentSourceNode = null;
         let pendingSignal = null;
-        let rawReceivedChunks = {}; // Храним сырые зашифрованные чанки { id: { body, salt } }
+        let rawReceivedChunks = {};
 
         function log(msg) {
             const l = document.getElementById('log');
@@ -87,7 +87,7 @@
         }
 
         // ==========================================
-        // КРИПТОГРАФИЯ (AES-GCM via Web Crypto)
+        // КРИПТОГРАФИЯ (AES-GCM)
         // ==========================================
 
         async function deriveKey(passphrase, saltHex) {
@@ -96,7 +96,7 @@
                 "raw", enc.encode(passphrase), "PBKDF2", false, ["deriveKey"]
             );
             return await window.crypto.subtle.deriveKey(
-                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 10000, hash: "SHA-256" },
+                { name: "PBKDF2", salt: hexToBytes(saltHex), iterations: 1000, hash: "SHA-256" }, // Снизили итерации для быстродействия
                 keyMaterial, { name: "AES-GCM", length: 128 }, false, ["encrypt", "decrypt"]
             );
         }
@@ -146,7 +146,7 @@
             log("[System] Загрузка ядра GGWave...");
             ggwave_factory().then(function(obj) {
                 ggwave = obj;
-                log("[System] Ядро готово. Режим Late-Decryption активен.");
+                log("[System] Ядро готово.");
                 restoreFromCache();
             });
         };
@@ -162,10 +162,13 @@
             if (context.state === 'suspended') context.resume();
         }
 
-        function emitAudioSignal(text, deadTimeMs = 600) {
+        function emitAudioSignal(text, deadTimeMs = 300) {
             return new Promise((resolve) => {
                 initGGWave();
                 if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
+
+                // Ставим флаг передачи ДО начала воспроизведения, чтобы микрофон не схавал первый сэмпл!
+                isTransmitting = true;
 
                 var waveform = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10);
                 var buf = convertTypedArray(waveform, Float32Array);
@@ -176,15 +179,12 @@
                 currentSourceNode.buffer = buffer;
                 currentSourceNode.connect(context.destination);
 
-                isTransmitting = true;
-
                 currentSourceNode.onended = () => {
                     deadTimeUntil = Date.now() + deadTimeMs;
-                    
                     setTimeout(() => {
                         isTransmitting = false;
                         resolve();
-                    }, 50);
+                    }, 30);
                 };
                 currentSourceNode.start(0);
             });
@@ -208,7 +208,7 @@
 
         function updateCacheUI() {
             const count = Object.keys(rawReceivedChunks).length;
-            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Накоплено сырых пакетов: ${count}` : "";
+            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Пакет в памяти` : "";
         }
 
         document.getElementById('clearCacheBtn').onclick = () => {
@@ -233,17 +233,22 @@
 
             if (!isListening) await startReceiver();
 
-            const sessionSalt = getRandomHex(4);
-            const CHUNK_SIZE = 12;
+            // Прогревочный перед передачей, чтобы подготовить микрофон приёмника
+            await sleep(150);
+
+            const sessionSalt = getRandomHex(2); // Сократили соль до 2 байт для уменьшения размера пакета
+            
+            // Увеличиваем размер чанка до 35 символов (для стандартных фраз будет ВСЕГО 1 ПАКЕТ!)
+            const CHUNK_SIZE = 35; 
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
-            log(`[TX] Начинаем передачу. Всего пакетов: ${totalPackets} шт.`);
+            log(`[TX] Старт передачи (${totalPackets} пакет(ов))...`);
 
             for (let i = 0; i < totalPackets; i++) {
                 const rawChunk = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
                 const encryptedChunk = await encryptText(rawChunk, pass, sessionSalt);
 
-                // Компактный JSON без лишних полей
+                // Максимально сжатый формат JSON: {"i":0,"t":1,"s":"a1","b":"..."}
                 const payload = JSON.stringify({
                     i: i,
                     t: totalPackets,
@@ -254,31 +259,29 @@
                 let delivered = false;
                 let pktAttempts = 0;
 
-                while (!delivered && pktAttempts < 5) {
+                while (!delivered && pktAttempts < 4) {
                     pktAttempts++;
-                    log(`[TX] Отправка пакета #${i + 1}/${totalPackets} (Попытка ${pktAttempts})...`);
+                    log(`[TX] Отправка пакета #${i + 1}/${totalPackets} (попытка ${pktAttempts})...`);
                     
-                    // Передаём пакет и держим дедтайм 100мс
-                    await emitAudioSignal(payload, 100);
+                    await emitAudioSignal(payload, 200);
 
-                    const ack = await waitForSignal(`ACK:${i}`, 4000);
+                    const ack = await waitForSignal(`ACK:${i}`, 2500);
                     if (ack) {
-                        log(`[TX] Получен ACK:${i}`);
+                        log(`[TX] Успех! Получен ACK:${i}`);
                         delivered = true;
-                        await sleep(200);
                     } else {
-                        log(`[TX] Таймаут ACK:${i}. Повтор...`);
-                        await sleep(300);
+                        log(`[TX] Таймаут ACK:${i}, повтор...`);
+                        await sleep(150);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] ОШИБКА: Пакет #${i + 1} застрял. Передача прервана.`);
+                    log(`[TX] ОШИБКА: Пакет #${i + 1} не доставлен.`);
                     return;
                 }
             }
 
-            log(`[TX] ВСЕ ПАКЕТЫ УСПЕШНО ДОСТАВЛЕНЫ В ПРИЁМНИК!`);
+            log(`[TX] ГОТОВО! Передача завершена.`);
         };
 
         function waitForSignal(type, timeoutMs) {
@@ -290,7 +293,7 @@
                         pendingSignal = null;
                         resolve(res);
                     }
-                }, 40);
+                }, 30);
 
                 setTimeout(() => {
                     clearInterval(checkInterval);
@@ -354,7 +357,7 @@
         async function handleIncomingSignal(rawStr) {
             if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-            // 1. Проверка ACK (для передатчика)
+            // 1. Проверка ACK
             if (rawStr.includes("ACK:")) {
                 const parts = rawStr.split("ACK:");
                 pendingSignal = { type: `ACK:${parts[1].trim()}` };
@@ -367,26 +370,24 @@
                 try {
                     const pkt = JSON.parse(jsonMatch[0]);
                     if (pkt && typeof pkt.i === 'number') {
-                        log(`[RX] Принят зашифрованный пакет #${pkt.i + 1}/${pkt.t}! Сохраняем...`);
+                        log(`[RX] Принят пакет #${pkt.i + 1}/${pkt.t}!`);
 
-                        // Сохраняем сырой чанк БЕЗ расшифровки
                         rawReceivedChunks[pkt.i] = { body: pkt.b, salt: pkt.s };
                         saveToCache(rawReceivedChunks);
 
-                        document.getElementById('pktStatus').innerText = `Накоплено сырых пакетов: ${Object.keys(rawReceivedChunks).length} / ${pkt.t}`;
+                        document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(rawReceivedChunks).length} / ${pkt.t}`;
 
-                        // Мгновенно ответим ACK, не тратя время на WebCrypto!
-                        await sleep(150);
-                        await emitAudioSignal(`ACK:${pkt.i}`, 600);
+                        // Мгновенный ACK отклик (100 мс пауза)
+                        await sleep(100);
+                        await emitAudioSignal(`ACK:${pkt.i}`, 400);
 
-                        // Если прилетели ВСЕ пакеты — запускаем финальную расшифровку!
                         if (Object.keys(rawReceivedChunks).length === pkt.t) {
-                            log("[RX] Все сырые пакеты на базе! Запускаем расшифровку...");
+                            log("[RX] Все пакеты собраны! Расшифровка...");
                             await decryptAndAssembleAll(pkt.t);
                         }
                     }
                 } catch (e) {
-                    log(`[RX] Битый JSON пакет: ${e.message}`);
+                    log(`[RX] Битый сигнал: ${e.message}`);
                 }
             }
         }
@@ -409,7 +410,7 @@
                 const decryptedChunk = await decryptText(chunkData.body, pass, chunkData.salt);
                 if (decryptedChunk === null) {
                     hasError = true;
-                    log(`[RX] ОШИБКА расшифровки чанка #${i + 1}! Введён неверный пароль?`);
+                    log(`[RX] ОШИБКА: Неверный ключ или битые данные!`);
                     break;
                 }
                 fullText += decryptedChunk;
@@ -417,10 +418,10 @@
 
             if (!hasError) {
                 document.getElementById('outputText').value = fullText;
-                log(`[RX] УСПЕХ! Данные успешно расшифрованы: "${fullText}"`);
-                document.getElementById('pktStatus').innerText = "Успешно расшифровано!";
+                log(`[RX] УСПЕХ! Текст расшифрован: "${fullText}"`);
+                document.getElementById('pktStatus').innerText = "Расшифровано!";
             } else {
-                document.getElementById('outputText').value = "❌ [ОШИБКА ДЕКРИПТА: Неверный пароль или данные повреждены]";
+                document.getElementById('outputText').value = "❌ [ОШИБКА ДЕКРИПТА: Неверный пароль]";
             }
         }
 
