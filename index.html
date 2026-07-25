@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Acoustic Link (GGWave + ACK)</title>
-    <!-- Локальное подключение ggwave.js -->
+    <title>Acoustic Link (GGWave Single-File + ACK)</title>
+    <!-- Подключаем твой однофайловый ggwave.js -->
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -19,11 +19,11 @@
 </head>
 <body>
 
-    <h2>Acoustic Modem (GGWave + ACK Protocol)</h2>
+    <h2>Acoustic Modem (Embedded WASM + ACK Protocol)</h2>
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Привет! Это проверка полноценного протокола с нарезкой пакетов и подлинными вызовами GGWave.</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Привет! Однофайловый GGWave с вшитым WASM работает отлично!</textarea>
         <button id="sendBtn">▶ Отправить с гарантией доставки</button>
     </div>
 
@@ -66,33 +66,30 @@
             l.scrollTop = l.scrollHeight;
         }
 
-        // Хелпер-конвертер типов массива как в официальном примере
         function convertTypedArray(src, type) {
             var buffer = new ArrayBuffer(src.byteLength);
             new src.constructor(buffer).set(src);
             return new type(buffer);
         }
 
-        // Инициализация WASM модуля ggwave (работает через локальный ggwave.js и ggwave.wasm)
+        // Инициализация (так как WASM внутри, никаких доп. файлов указывать НЕ надо)
         window.onload = function() {
-            log("[System] Загрузка локального ядра GGWave...");
+            log("[System] Загрузка встроенного ядра GGWave...");
             
             if (typeof ggwave_factory === 'undefined') {
-                log("[Error] Ошибка: ggwave.js не подключен!");
+                log("[Error] Ошибка: ggwave.js не подключен или имя файла отличается!");
                 return;
             }
 
-            ggwave_factory({
-                locateFile: (path) => path.endsWith('.wasm') ? 'ggwave.wasm' : path
-            }).then(function(obj) {
+            // Просто вызываем фабрику без параметров!
+            ggwave_factory().then(function(obj) {
                 ggwave = obj;
-                log("[System] Ядро GGWave инициализировано.");
+                log("[System] Ядро GGWave успешно запущено из Base64!");
             }).catch(err => {
-                log("[Error] Ошибка загрузки WASM: " + err);
+                log("[Error] Ошибка инициализации ядра: " + err);
             });
         };
 
-        // Инициализация AudioContext и параметров GGWave
         function initGGWave() {
             if (!context) {
                 context = new AudioContext({ sampleRate: 48000 });
@@ -102,18 +99,16 @@
                 parameters.sampleRateOut = context.sampleRate;
                 instance = ggwave.init(parameters);
                 
-                log("[System] AudioContext и экземпляр GGWave созданы.");
+                log("[System] AudioContext и экземпляр GGWave подсоединены.");
             }
             if (context.state === 'suspended') {
                 context.resume();
             }
         }
 
-        // Вспомогательная функция отправки звука (из официального примера)
         function emitAudioSignal(text) {
             initGGWave();
 
-            // Кодируем с верными аргументами: (instance, data, protocol, volume)
             var waveform = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10);
 
             var buf = convertTypedArray(waveform, Float32Array);
@@ -130,20 +125,21 @@
         // 1. ЛОГИКА ПЕРЕДАТЧИКА (TX)
         // ==========================================
         document.getElementById('sendBtn').onclick = async () => {
-            if (!ggwave || !instance && !context) {
-                initGGWave();
+            if (!ggwave) {
+                alert("GGWave еще не инициализирован!");
+                return;
             }
+            initGGWave();
             
             const text = document.getElementById('inputText').value;
             if (!text) return;
 
-            // Если захват звука не включен, включаем слушатель ответов
             if (!isListening) await startReceiver();
 
             const CHUNK_SIZE = 35;
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
-            log(`[TX] Начинаем передачу ${totalPackets} пакетов...`);
+            log(`[TX] Передача начата: всего пакетов ${totalPackets}`);
 
             for (let i = 0; i < totalPackets; i++) {
                 const chunkText = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
@@ -159,29 +155,29 @@
 
                 while (!delivered && attempts < 5) {
                     attempts++;
-                    log(`[TX] Отправка пакета #${i} (Попытка ${attempts})...`);
+                    log(`[TX] Пакетик #${i} (Попытка ${attempts})...`);
                     
                     emitAudioSignal(payload);
 
                     const ackReceived = await waitForAck(i, 2500);
 
                     if (ackReceived) {
-                        log(`[TX] Получен ACK:${i}! Пакет доставлен.`);
+                        log(`[TX] Успешно! Доставлен ACK:${i}`);
                         delivered = true;
                         await sleep(300);
                     } else {
-                        log(`[TX] Таймаут ожидания ACK:${i}. Повтор...`);
+                        log(`[TX] Таймаут ACK:${i}. Повторная попытка...`);
                         await sleep(500);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] ОШИБКА: Не удалось доставить пакет #${i}.`);
+                    log(`[TX] ОШИБКА: Пакет #${i} не доставлен за 5 попыток.`);
                     return;
                 }
             }
 
-            log(`[TX] ВЕСЬ ТЕКСТ УСПЕШНО ПЕРЕДАН И ПОДТВЕРЖДЁН!`);
+            log(`[TX] УСПЕХ! Вся цепочка доставлена.`);
         };
 
         function waitForAck(expectedId, timeoutMs) {
@@ -236,7 +232,6 @@
                     recorder = context.createJavaScriptNode(bufferSize, 1, 1);
                 }
 
-                // В точности как в примере: декодируем куски через Int8Array
                 recorder.onaudioprocess = function (e) {
                     var source = e.inputBuffer;
                     var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
@@ -253,17 +248,17 @@
                 isListening = true;
                 document.getElementById('listenStatus').innerText = "Слушаю...";
                 document.getElementById('listenStatus').style.color = "#4ec9b0";
-                log("[RX] Микрофон успешно активирован.");
+                log("[RX] Микрофон активен.");
 
             } catch (err) {
-                alert("Ошибка доступа к микрофону: " + err);
+                alert("Ошибка микрофона: " + err);
             }
         }
 
         function handleIncomingSignal(rawStr) {
             if (rawStr.startsWith("ACK:")) {
                 const ackId = parseInt(rawStr.split(":")[1], 10);
-                log(`[RX/TX Listener] Пойман ответ ACK:${ackId}`);
+                log(`[RX/TX Listener] Ответ поймали ACK:${ackId}`);
                 pendingAck = ackId;
                 return;
             }
@@ -271,7 +266,7 @@
             try {
                 const pkt = JSON.parse(rawStr);
                 if (pkt && typeof pkt.id === 'number') {
-                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Отправка ACK:${pkt.id}...`);
+                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Пикуем ACK:${pkt.id}...`);
                     
                     receivedChunks[pkt.id] = pkt.body;
                     document.getElementById('pktStatus').innerText = `Принято: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
@@ -293,7 +288,7 @@
                 fullText += chunksMap[i] || "";
             }
             document.getElementById('outputText').value = fullText;
-            log(`[RX] УСПЕХ! Текст полностью собран (${fullText.length} символов).`);
+            log(`[RX] ГОТОВО! Собрано символов: ${fullText.length}.`);
         }
 
         function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
