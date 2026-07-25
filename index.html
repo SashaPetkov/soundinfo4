@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Hardened Acoustic Modem (HMAC + AES-GCM)</title>
-    <!-- Подключаем монолитный ggwave.js -->
+    <!-- Подключаем однофайловый ggwave.js -->
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
@@ -32,7 +32,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Успешная передача через акустический канал с полной защитой от перехвата и повторов!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Успешная передача через акустический канал с дедтаймом от эха!</textarea>
         <button id="sendBtn">▶ HMAC Auth и Отправка</button>
     </div>
 
@@ -68,8 +68,9 @@
         let instance = null;
 
         let isListening = false;
-        let isTransmitting = false; // Блокировка приёма во время собственного звука
-        let handshakeCompleted = false; // Защита от зацикливания AUTH
+        let isTransmitting = false; // Блокировка приёма во время воспроизведения
+        let deadTimeUntil = 0;      // Защита от эха собственным писком
+        let handshakeCompleted = false; // Флаг пройденного рукопожатия
         let currentSourceNode = null;
 
         let pendingSignal = null;
@@ -91,7 +92,6 @@
         // КРИПТОГРАФИЯ (HMAC + AES-GCM via Web Crypto)
         // ==========================================
 
-        // Короткий HMAC-SHA256 для Handshake (16 HEX символов = звук за долю секунды)
         async function computeHMAC(nonceHex, passphrase) {
             const enc = new TextEncoder();
             const key = await window.crypto.subtle.importKey(
@@ -190,9 +190,15 @@
                 currentSourceNode.connect(context.destination);
 
                 isTransmitting = true;
+
                 currentSourceNode.onended = () => {
-                    // Короткая задержка на затухание реверберации в помещении
-                    setTimeout(() => { isTransmitting = false; resolve(); }, 150);
+                    // Глушим микрофон ещё на 700 мс после окончания звука, чтобы эхо полностью затихло
+                    deadTimeUntil = Date.now() + 700;
+                    
+                    setTimeout(() => {
+                        isTransmitting = false;
+                        resolve();
+                    }, 150);
                 };
                 currentSourceNode.start(0);
             });
@@ -242,7 +248,7 @@
 
             if (!isListening) await startReceiver();
 
-            handshakeCompleted = false; // Сброс состояния для нового обмена
+            handshakeCompleted = false;
 
             // 1. AUTH CHALLENGE-RESPONSE (HMAC)
             const sessionSalt = getRandomHex(4);
@@ -370,7 +376,8 @@
                     context.createJavaScriptNode(bufferSize, 1, 1);
 
                 recorder.onaudioprocess = function (e) {
-                    if (isTransmitting) return; // Игнорируем всё во время собственного писка
+                    // Игнорируем всё во время звучания или пока не закончился дедтайм
+                    if (isTransmitting || Date.now() < deadTimeUntil) return;
 
                     var source = e.inputBuffer;
                     var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
@@ -394,13 +401,13 @@
         }
 
         async function handleIncomingSignal(rawStr) {
-            const pass = document.getElementById('secretPass').value;
+            if (isTransmitting || Date.now() < deadTimeUntil) return;
 
-            if (isTransmitting) return;
+            const pass = document.getElementById('secretPass').value;
 
             // 1. Приём AUTH Challenge
             if (rawStr.startsWith("AUTH:")) {
-                if (handshakeCompleted) return; // Игнорируем повторы AUTH в процессе работы
+                if (handshakeCompleted) return;
 
                 const parts = rawStr.split(":");
                 const nonceHex = parts[2];
@@ -408,9 +415,8 @@
                 log(`[RX] Пойман Challenge! Считаем HMAC...`);
                 const hmacRes = await computeHMAC(nonceHex, pass);
 
-                handshakeCompleted = true; // Фиксируем факт рукопожатия
+                handshakeCompleted = true;
 
-                await sleep(100);
                 await emitAudioSignal(`SA:${hmacRes}`);
                 return;
             }
@@ -443,12 +449,11 @@
 
                             document.getElementById('pktStatus').innerText = `Принято и расшифровано: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
 
-                            await sleep(150);
                             await emitAudioSignal(`ACK:${pkt.id}`);
 
                             if (Object.keys(receivedChunks).length === pkt.total) {
                                 assembleFinalData(receivedChunks, pkt.total);
-                                handshakeCompleted = false; // Готовы к следующим сессиям
+                                handshakeCompleted = false;
                             }
                         } else {
                             log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key!`);
