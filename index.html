@@ -3,30 +3,29 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Simple Acoustic Packet Transfer</title>
+    <title>Acoustic Modem (Handshake + Cache + ACK)</title>
+    <!-- Подключаем однофайловый ggwave.js -->
     <script src="ggwave.js"></script>
     <style>
         body { font-family: monospace, sans-serif; max-width: 750px; margin: 20px auto; padding: 0 10px; background: #1e1e1e; color: #d4d4d4; }
-        textarea, input { width: 100%; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; font-family: monospace; }
-        textarea { height: 80px; }
+        textarea { width: 100%; height: 80px; background: #252526; color: #fff; border: 1px solid #444; padding: 10px; box-sizing: border-box; border-radius: 4px; }
         button { padding: 12px 18px; margin: 8px 0; background: #0e639c; color: white; border: none; cursor: pointer; font-weight: bold; border-radius: 4px; font-size: 14px; }
         button:hover { background: #1177bb; }
         .box { border: 1px solid #3c3c3c; padding: 15px; margin-bottom: 20px; border-radius: 6px; background: #252526; }
-        #log { background: #111; padding: 10px; height: 200px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
+        #log { background: #111; padding: 10px; height: 220px; overflow-y: scroll; color: #4ec9b0; border: 1px solid #333; font-size: 12px; border-radius: 4px; }
         .status { font-weight: bold; color: #ce9178; margin-left: 10px; }
         .progress { background: #111; padding: 8px; border-radius: 4px; font-size: 12px; margin-top: 10px; color: #dcdcaa; }
-        .vu-wrapper { width: 100%; background: #111; height: 8px; border-radius: 4px; margin-top: 8px; overflow: hidden; border: 1px solid #444; }
-        .vu-bar { height: 100%; width: 0%; background: #4ec9b0; transition: width 0.05s ease-out; }
+        .cache-info { font-size: 11px; color: #ce9178; margin-top: 5px; }
     </style>
 </head>
 <body>
 
-    <h2>Простая пакетированная акустическая передача</h2>
+    <h2>Акустический Модем (Handshake + Cache + ACK)</h2>
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Привет! Это тестовая строка для проверки акустической передачи пакетами через GGWave.</textarea>
-        <button id="sendBtn">▶ Отправить данные</button>
+        <textarea id="inputText" placeholder="Введите текст...">Привет! Это синхронизированная передача с асинхронным ожиданием аудиофайлов и Handshake.</textarea>
+        <button id="sendBtn">▶ Начать Handshake и Отправить</button>
     </div>
 
     <div class="box">
@@ -34,17 +33,14 @@
         <button id="listenBtn">🎙 Включить микрофон приёмника</button>
         <span id="listenStatus" class="status">Выключен</span>
 
-        <div class="vu-wrapper" title="Уровень звука микрофона">
-            <div id="vuBar" class="vu-bar"></div>
-        </div>
-
         <div class="progress">
-            Статус приёма: <span id="pktStatus">Ожидание...</span>
+            Статус сессии: <span id="pktStatus">Ожидание SYN...</span>
         </div>
 
         <h4>Полученный текст:</h4>
         <textarea id="outputText" readonly></textarea>
-        <button id="clearBtn" style="background: #a12626; padding: 6px 10px; font-size: 11px;">Очистить</button>
+        <div class="cache-info" id="cacheInfo"></div>
+        <button id="clearCacheBtn" style="background: #a12626; padding: 6px 10px; font-size: 11px;">Сбросить кэш сессии</button>
     </div>
 
     <div class="box">
@@ -64,11 +60,10 @@
         let instance = null;
 
         let isListening = false;
-        let isTransmitting = false; 
-        let deadTimeUntil = 0;      
-        
+        let isTransmitting = false; // Глушим микрофон во время воспроизведения
         let currentSourceNode = null;
-        let pendingSignal = null;
+
+        let pendingSignal = null; // Хранит ответ (SYN-ACK или ACK:id)
         let receivedChunks = {};
 
         function log(msg) {
@@ -83,36 +78,50 @@
             return new type(buffer);
         }
 
-        // ==========================================
-        // ИНИЦИАЛИЗАЦИЯ И АУДИОЯДРО
-        // ==========================================
         window.onload = function() {
-            log("[System] Загрузка ядра GGWave...");
+            log("[System] Загрузка встроенного ядра GGWave...");
+            
+            if (typeof ggwave_factory === 'undefined') {
+                log("[Error] Ошибка: ggwave.js не найден!");
+                return;
+            }
+
             ggwave_factory().then(function(obj) {
                 ggwave = obj;
-                log("[System] Ядро готово к работе.");
+                log("[System] Ядро GGWave запущено.");
+                restoreFromCache();
+            }).catch(err => {
+                log("[Error] Ошибка инициализации ядра: " + err);
             });
         };
 
         function initGGWave() {
             if (!context) {
                 context = new AudioContext({ sampleRate: 48000 });
+
                 parameters = ggwave.getDefaultParameters();
                 parameters.sampleRateInp = context.sampleRate;
                 parameters.sampleRateOut = context.sampleRate;
                 instance = ggwave.init(parameters);
+                
+                log("[System] AudioContext и экземпляр GGWave созданы.");
             }
-            if (context.state === 'suspended') context.resume();
+            if (context.state === 'suspended') {
+                context.resume();
+            }
         }
 
-        function emitAudioSignal(text, deadTimeMs = 250) {
+        // Воспроизведение звука с Promise (резолвится СТРОГО ПОСЛЕ ЗАВЕРШЕНИЯ звука)
+        function emitAudioSignal(text) {
             return new Promise((resolve) => {
                 initGGWave();
-                if (currentSourceNode) { try { currentSourceNode.stop(); } catch(e) {} }
 
-                isTransmitting = true;
+                if (currentSourceNode) {
+                    try { currentSourceNode.stop(); } catch(e) {}
+                }
 
                 var waveform = ggwave.encode(instance, text, ggwave.ProtocolId.GGWAVE_PROTOCOL_AUDIBLE_FAST, 10);
+
                 var buf = convertTypedArray(waveform, Float32Array);
                 var buffer = context.createBuffer(1, buf.length, context.sampleRate);
                 buffer.getChannelData(0).set(buf);
@@ -121,108 +130,168 @@
                 currentSourceNode.buffer = buffer;
                 currentSourceNode.connect(context.destination);
 
+                isTransmitting = true;
+
                 currentSourceNode.onended = () => {
-                    deadTimeUntil = Date.now() + deadTimeMs;
+                    // Пауза 150мс после звука, чтобы эхо в комнате потухло перед приёмом
                     setTimeout(() => {
                         isTransmitting = false;
-                        resolve();
-                    }, 20);
+                        resolve(); // Сигнализируем, что воспроизведение завершено!
+                    }, 150);
                 };
+
                 currentSourceNode.start(0);
             });
         }
 
-        document.getElementById('clearBtn').onclick = () => {
+        // ==========================================
+        // 1. КЭШИРОВАНИЕ (LOCAL STORAGE)
+        // ==========================================
+        function saveToCache(chunks, totalText = "") {
+            localStorage.setItem("acoustic_chunks", JSON.stringify(chunks));
+            if (totalText) localStorage.setItem("acoustic_full_text", totalText);
+            updateCacheUI();
+        }
+
+        function restoreFromCache() {
+            const cachedChunks = localStorage.getItem("acoustic_chunks");
+            const cachedText = localStorage.getItem("acoustic_full_text");
+
+            if (cachedChunks) {
+                receivedChunks = JSON.parse(cachedChunks);
+                updateCacheUI();
+            }
+            if (cachedText) {
+                document.getElementById('outputText').value = cachedText;
+            }
+        }
+
+        function updateCacheUI() {
+            const count = Object.keys(receivedChunks).length;
+            document.getElementById('cacheInfo').innerText = count > 0 ? `[Кэш] Восстановлено пакетов: ${count}` : "";
+        }
+
+        document.getElementById('clearCacheBtn').onclick = () => {
+            localStorage.removeItem("acoustic_chunks");
+            localStorage.removeItem("acoustic_full_text");
             receivedChunks = {};
             document.getElementById('outputText').value = "";
-            document.getElementById('pktStatus').innerText = "Ожидание...";
-            log("[RX] Буфер очищен.");
+            document.getElementById('cacheInfo').innerText = "[Кэш] Очищен.";
+            document.getElementById('pktStatus').innerText = "Ожидание SYN...";
+            log("[Cache] Данные кэша очищены.");
         };
 
         // ==========================================
-        // 1. ПЕРЕДАТЧИК (TX)
+        // 2. ЛОГИКА ПЕРЕДАТЧИКА (TX WITH HANDSHAKE)
         // ==========================================
         document.getElementById('sendBtn').onclick = async () => {
-            if (!ggwave) return;
+            if (!ggwave) { alert("Ядро не инициализировано!"); return; }
             initGGWave();
             
             const text = document.getElementById('inputText').value;
-            if (!text) { alert("Введите текст!"); return; }
+            if (!text) return;
 
             if (!isListening) await startReceiver();
 
-            await sleep(150);
+            // 1. Этап Handshake (Установка соединения)
+            log("[TX] --- Начинаем Handshake (Отправка SYN) ---");
+            let handshakeOk = false;
+            let synAttempts = 0;
 
-            // Оптимальный размер порции текста в 1 пакете
-            const CHUNK_SIZE = 20; 
+            while (!handshakeOk && synAttempts < 5) {
+                synAttempts++;
+                log(`[TX] Запрос связи SYN (Попытка ${synAttempts})...`);
+                
+                // Ждём полной проигрывания звука SYN
+                await emitAudioSignal("SYN");
+
+                // Запускаем отсчёт 5 сек ПОСЛЕ того как звук проиграл
+                const synAck = await waitForSignal("SYN-ACK", 5000);
+                if (synAck) {
+                    handshakeOk = true;
+                    log("[TX] Рукопожатие успешно! Получен SYN-ACK от приёмника.");
+                } else {
+                    log(`[TX] Таймаут SYN-ACK. Повторная попытка...`);
+                    await sleep(300);
+                }
+            }
+
+            if (!handshakeOk) {
+                log("[TX] ОШИБКА: Приёмник не ответил на Handshake.");
+                return;
+            }
+
+            // 2. Этап передачи пакетов
+            const CHUNK_SIZE = 25; // Уменьшенный размер чанка для ускорения кодирования
             const totalPackets = Math.ceil(text.length / CHUNK_SIZE);
 
-            log(`[TX] Старт передачи (${totalPackets} пакетов)...`);
+            log(`[TX] Передача пакетов: всего ${totalPackets} шт.`);
 
             for (let i = 0; i < totalPackets; i++) {
                 const chunkText = text.substring(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
-
+                
                 const payload = JSON.stringify({
-                    i: i,
-                    t: totalPackets,
-                    d: chunkText
+                    id: i,
+                    total: totalPackets,
+                    body: chunkText
                 });
 
                 let delivered = false;
-                let pktAttempts = 0;
+                let attempts = 0;
 
-                while (!delivered && pktAttempts < 5) {
-                    pktAttempts++;
-                    log(`[TX] Отправка пакета #${i + 1}/${totalPackets} (попытка ${pktAttempts})...`);
+                while (!delivered && attempts < 5) {
+                    attempts++;
+                    log(`[TX] Отправка пакета #${i} (Попытка ${attempts})...`);
                     
-                    await emitAudioSignal(payload, 200);
+                    // Ждём пока замолчит динамик
+                    await emitAudioSignal(payload);
 
-                    const ack = await waitForSignal(`ACK:${i}`, 2500);
-                    if (ack) {
-                        log(`[TX] Получен ACK:${i}`);
+                    // Ищем ответный ACK
+                    const ackReceived = await waitForSignal(`ACK:${i}`, 5000);
+
+                    if (ackReceived) {
+                        log(`[TX] Успешно! Подтверждён ACK:${i}`);
                         delivered = true;
-                        await sleep(100);
+                        await sleep(300);
                     } else {
-                        log(`[TX] Таймаут ACK:${i}, повтор...`);
-                        await sleep(150);
+                        log(`[TX] Таймаут ACK:${i}. Повтор...`);
+                        await sleep(400);
                     }
                 }
 
                 if (!delivered) {
-                    log(`[TX] СБОЙ: Пакет #${i + 1} не доставлен. Передача остановлена.`);
+                    log(`[TX] ОШИБКА: Передача сорвана на пакете #${i}.`);
                     return;
                 }
             }
 
-            log(`[TX] УСПЕХ: Все пакеты доставлены!`);
+            log(`[TX] ВСЕ ДАННЫЕ УСПЕШНО ПЕРЕДАНЫ И ПОДТВЕРЖДЕНЫ!`);
         };
 
-        function waitForSignal(type, timeoutMs) {
+        function waitForSignal(expectedSignal, timeoutMs) {
             return new Promise((resolve) => {
                 const checkInterval = setInterval(() => {
-                    if (pendingSignal && pendingSignal.type === type) {
-                        const res = pendingSignal;
+                    if (pendingSignal === expectedSignal) {
                         clearInterval(checkInterval);
                         pendingSignal = null;
-                        resolve(res);
+                        resolve(true);
                     }
-                }, 25);
+                }, 50);
 
                 setTimeout(() => {
                     clearInterval(checkInterval);
-                    if (pendingSignal && pendingSignal.type === type) {
-                        const res = pendingSignal;
+                    if (pendingSignal === expectedSignal) {
                         pendingSignal = null;
-                        resolve(res);
+                        resolve(true);
                     } else {
-                        resolve(null);
+                        resolve(false);
                     }
                 }, timeoutMs);
             });
         }
 
         // ==========================================
-        // 2. ПРИЁМНИК (RX)
+        // 3. ЛОГИКА ПРИЁМНИКА (RX)
         // ==========================================
         document.getElementById('listenBtn').onclick = async () => {
             await startReceiver();
@@ -232,34 +301,31 @@
             if (isListening) return;
             initGGWave();
 
+            let constraints = {
+                audio: {
+                    echoCancellation: false,
+                    autoGainControl: false,
+                    noiseSuppression: false,
+                    suppressLocalAudioPlayback: false
+                }
+            };
+
             try {
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    audio: { echoCancellation: false, autoGainControl: false, noiseSuppression: false }
-                });
+                const stream = await navigator.mediaDevices.getUserMedia(constraints);
                 mediaStream = context.createMediaStreamSource(stream);
 
                 var bufferSize = 1024;
-                recorder = context.createScriptProcessor ? 
-                    context.createScriptProcessor(bufferSize, 1, 1) : 
-                    context.createJavaScriptNode(bufferSize, 1, 1);
-
-                const vuBar = document.getElementById('vuBar');
+                if (context.createScriptProcessor) {
+                    recorder = context.createScriptProcessor(bufferSize, 1, 1);
+                } else {
+                    recorder = context.createJavaScriptNode(bufferSize, 1, 1);
+                }
 
                 recorder.onaudioprocess = function (e) {
+                    if (isTransmitting) return; // Игнорируем микрофон пока сами пищим
+
                     var source = e.inputBuffer;
-                    var pcmData = source.getChannelData(0);
-
-                    // Индикатор уровня звука
-                    let sum = 0;
-                    for (let i = 0; i < pcmData.length; i++) {
-                        sum += pcmData[i] * pcmData[i];
-                    }
-                    let rms = Math.sqrt(sum / pcmData.length);
-                    if (vuBar) vuBar.style.width = Math.min(100, Math.floor(rms * 400)) + '%';
-
-                    if (isTransmitting || Date.now() < deadTimeUntil) return;
-
-                    var res = ggwave.decode(instance, convertTypedArray(new Float32Array(pcmData), Int8Array));
+                    var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
 
                     if (res && res.length > 0) {
                         const rawStr = new TextDecoder("utf-8").decode(res);
@@ -274,50 +340,56 @@
                 document.getElementById('listenStatus').innerText = "Слушаю...";
                 document.getElementById('listenStatus').style.color = "#4ec9b0";
                 log("[RX] Микрофон активен.");
+
             } catch (err) {
                 alert("Ошибка доступа к микрофону: " + err);
             }
         }
 
-        async function handleIncomingSignal(rawStr) {
-            if (isTransmitting || Date.now() < deadTimeUntil) return;
-
-            // 1. Приём ACK
-            if (rawStr.includes("ACK:")) {
-                const parts = rawStr.split("ACK:");
-                pendingSignal = { type: `ACK:${parts[1].trim()}` };
+        function handleIncomingSignal(rawStr) {
+            // Реакция на служебные сигналы (SYN / SYN-ACK / ACK)
+            if (rawStr === "SYN") {
+                log("[RX] Пойман сигнал SYN! Отправляем ответ SYN-ACK...");
+                setTimeout(() => { emitAudioSignal("SYN-ACK"); }, 200);
                 return;
             }
 
-            // 2. Приём Пакета
-            const jsonMatch = rawStr.match(/\{"i":.*\}/);
-            if (jsonMatch) {
-                try {
-                    const pkt = JSON.parse(jsonMatch[0]);
-                    if (pkt && typeof pkt.i === 'number') {
-                        log(`[RX] Принят пакет #${pkt.i + 1}/${pkt.t}`);
-
-                        receivedChunks[pkt.i] = pkt.d;
-                        document.getElementById('pktStatus').innerText = `Принято пакетов: ${Object.keys(receivedChunks).length} / ${pkt.t}`;
-
-                        // Отправляем ACK
-                        await sleep(100);
-                        await emitAudioSignal(`ACK:${pkt.i}`, 350);
-
-                        // Сборка при полном получении
-                        if (Object.keys(receivedChunks).length === pkt.t) {
-                            let fullText = "";
-                            for (let idx = 0; idx < pkt.t; idx++) {
-                                fullText += receivedChunks[idx] || "";
-                            }
-                            document.getElementById('outputText').value = fullText;
-                            log(`[RX] СБОРКА ЗАВЕРШЕНА: "${fullText}"`);
-                        }
-                    }
-                } catch (e) {
-                    log(`[RX] Битый кадр: ${e.message}`);
-                }
+            if (rawStr === "SYN-ACK" || rawStr.startsWith("ACK:")) {
+                log(`[RX/TX Listener] Сигнал подтверждения: ${rawStr}`);
+                pendingSignal = rawStr;
+                return;
             }
+
+            // Обработка пакета данных
+            try {
+                const pkt = JSON.parse(rawStr);
+                if (pkt && typeof pkt.id === 'number') {
+                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Отправка ACK:${pkt.id}...`);
+                    
+                    receivedChunks[pkt.id] = pkt.body;
+                    saveToCache(receivedChunks);
+
+                    document.getElementById('pktStatus').innerText = `Принято: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
+
+                    setTimeout(() => {
+                        emitAudioSignal(`ACK:${pkt.id}`);
+                    }, 200);
+
+                    if (Object.keys(receivedChunks).length === pkt.total) {
+                        assembleFinalData(receivedChunks, pkt.total);
+                    }
+                }
+            } catch (e) {}
+        }
+
+        function assembleFinalData(chunksMap, total) {
+            let fullText = "";
+            for (let i = 0; i < total; i++) {
+                fullText += chunksMap[i] || "";
+            }
+            document.getElementById('outputText').value = fullText;
+            saveToCache(chunksMap, fullText);
+            log(`[RX] ГОТОВО! Собрано символов: ${fullText.length}. Данные в кэше.`);
         }
 
         function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
