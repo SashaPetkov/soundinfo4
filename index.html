@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Secure Acoustic Modem (HMAC Handshake + AES-GCM)</title>
+    <title>Hardened Acoustic Modem (HMAC + AES-GCM)</title>
     <!-- Подключаем монолитный ggwave.js -->
     <script src="ggwave.js"></script>
     <style>
@@ -32,7 +32,7 @@
 
     <div class="box">
         <h3>1. Устройство А (Передатчик)</h3>
-        <textarea id="inputText" placeholder="Введите текст...">Секретное сообщение: Успешно поднят надежный защищенный Handshake через HMAC и AES-GCM!</textarea>
+        <textarea id="inputText" placeholder="Введите текст...">Секретный текст: Успешная передача через акустический канал с полной защитой от перехвата и повторов!</textarea>
         <button id="sendBtn">▶ HMAC Auth и Отправка</button>
     </div>
 
@@ -68,7 +68,8 @@
         let instance = null;
 
         let isListening = false;
-        let isTransmitting = false;
+        let isTransmitting = false; // Блокировка приёма во время собственного звука
+        let handshakeCompleted = false; // Защита от зацикливания AUTH
         let currentSourceNode = null;
 
         let pendingSignal = null;
@@ -90,7 +91,7 @@
         // КРИПТОГРАФИЯ (HMAC + AES-GCM via Web Crypto)
         // ==========================================
 
-        // Короткий HMAC-SHA256 для Handshake (длина 16 HEX символов = звук за долю секунды)
+        // Короткий HMAC-SHA256 для Handshake (16 HEX символов = звук за долю секунды)
         async function computeHMAC(nonceHex, passphrase) {
             const enc = new TextEncoder();
             const key = await window.crypto.subtle.importKey(
@@ -190,6 +191,7 @@
 
                 isTransmitting = true;
                 currentSourceNode.onended = () => {
+                    // Короткая задержка на затухание реверберации в помещении
                     setTimeout(() => { isTransmitting = false; resolve(); }, 150);
                 };
                 currentSourceNode.start(0);
@@ -220,6 +222,7 @@
         document.getElementById('clearCacheBtn').onclick = () => {
             localStorage.removeItem("sec_acoustic_chunks");
             receivedChunks = {};
+            handshakeCompleted = false;
             document.getElementById('outputText').value = "";
             document.getElementById('cacheInfo').innerText = "[Кэш] Очищен.";
             document.getElementById('pktStatus').innerText = "Ожидание авторизации...";
@@ -238,6 +241,8 @@
             if (!text || !pass) { alert("Введите текст и секретный пароль!"); return; }
 
             if (!isListening) await startReceiver();
+
+            handshakeCompleted = false; // Сброс состояния для нового обмена
 
             // 1. AUTH CHALLENGE-RESPONSE (HMAC)
             const sessionSalt = getRandomHex(4);
@@ -295,7 +300,7 @@
 
                 while (!delivered && pktAttempts < 5) {
                     pktAttempts++;
-                    log(`[TX] Отправка AES-пакета #${i} (Попытка ${pktAttempts})...`);
+                    log(`[TX] Отправка AES-пакета #${i + 1}/${totalPackets} (Попытка ${pktAttempts})...`);
                     await emitAudioSignal(payload);
 
                     const ack = await waitForSignal(`ACK:${i}`, 5000);
@@ -310,7 +315,7 @@
                 }
 
                 if (!delivered) {
-                    log(`[TX] СБОЙ: Пакет #${i} не доставлен.`);
+                    log(`[TX] СБОЙ: Пакет #${i + 1} не доставлен.`);
                     return;
                 }
             }
@@ -365,7 +370,8 @@
                     context.createJavaScriptNode(bufferSize, 1, 1);
 
                 recorder.onaudioprocess = function (e) {
-                    if (isTransmitting) return;
+                    if (isTransmitting) return; // Игнорируем всё во время собственного писка
+
                     var source = e.inputBuffer;
                     var res = ggwave.decode(instance, convertTypedArray(new Float32Array(source.getChannelData(0)), Int8Array));
 
@@ -390,59 +396,66 @@
         async function handleIncomingSignal(rawStr) {
             const pass = document.getElementById('secretPass').value;
 
-            // Обработка Challenge AUTH
+            if (isTransmitting) return;
+
+            // 1. Приём AUTH Challenge
             if (rawStr.startsWith("AUTH:")) {
+                if (handshakeCompleted) return; // Игнорируем повторы AUTH в процессе работы
+
                 const parts = rawStr.split(":");
                 const nonceHex = parts[2];
 
                 log(`[RX] Пойман Challenge! Считаем HMAC...`);
-
                 const hmacRes = await computeHMAC(nonceHex, pass);
 
-                // Отправляем ультракороткий сигнал SA:<hmac> (всего 19 символов!)
-                setTimeout(async () => {
-                    await emitAudioSignal(`SA:${hmacRes}`);
-                }, 200);
+                handshakeCompleted = true; // Фиксируем факт рукопожатия
+
+                await sleep(100);
+                await emitAudioSignal(`SA:${hmacRes}`);
                 return;
             }
 
-            // Приём ответа на Handshake (на передатчике)
+            // 2. Ответ на Handshake (для передатчика)
             if (rawStr.startsWith("SA:")) {
                 const payload = rawStr.substring(3);
                 pendingSignal = { type: "AUTH_RESP", payload: payload };
                 return;
             }
 
-            // Приём ACK
+            // 3. Подтверждение ACK (для передатчика)
             if (rawStr.startsWith("ACK:")) {
                 pendingSignal = { type: rawStr };
                 return;
             }
 
-            // Обработка зашифрованного пакета
-            try {
-                const pkt = JSON.parse(rawStr);
-                if (pkt && typeof pkt.id === 'number') {
-                    log(`[RX] Принят пакет #${pkt.id}/${pkt.total}. Расшифровка...`);
+            // 4. Зашифрованный пакет данных (для приёмника)
+            if (rawStr.startsWith("{") && rawStr.endsWith("}")) {
+                try {
+                    const pkt = JSON.parse(rawStr);
+                    if (pkt && typeof pkt.id === 'number') {
+                        log(`[RX] Принят пакет #${pkt.id + 1}/${pkt.total}. Расшифровка...`);
 
-                    const decryptedBody = await decryptText(pkt.body, pass, pkt.salt);
+                        const decryptedBody = await decryptText(pkt.body, pass, pkt.salt);
 
-                    if (decryptedBody !== null) {
-                        receivedChunks[pkt.id] = decryptedBody;
-                        saveToCache(receivedChunks);
+                        if (decryptedBody !== null) {
+                            receivedChunks[pkt.id] = decryptedBody;
+                            saveToCache(receivedChunks);
 
-                        document.getElementById('pktStatus').innerText = `Принято и расшифровано: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
+                            document.getElementById('pktStatus').innerText = `Принято и расшифровано: ${Object.keys(receivedChunks).length} / ${pkt.total}`;
 
-                        setTimeout(() => { emitAudioSignal(`ACK:${pkt.id}`); }, 200);
+                            await sleep(150);
+                            await emitAudioSignal(`ACK:${pkt.id}`);
 
-                        if (Object.keys(receivedChunks).length === pkt.total) {
-                            assembleFinalData(receivedChunks, pkt.total);
+                            if (Object.keys(receivedChunks).length === pkt.total) {
+                                assembleFinalData(receivedChunks, pkt.total);
+                                handshakeCompleted = false; // Готовы к следующим сессиям
+                            }
+                        } else {
+                            log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key!`);
                         }
-                    } else {
-                        log(`[RX] ОШИБКА ДЕКРИПТА: Неверный Pre-Shared Key!`);
                     }
-                }
-            } catch (e) {}
+                } catch (e) {}
+            }
         }
 
         function assembleFinalData(chunksMap, total) {
@@ -451,7 +464,7 @@
                 fullText += chunksMap[i] || "";
             }
             document.getElementById('outputText').value = fullText;
-            log(`[RX] УСПЕХ! Текст восстановлен из AES-GCM: ${fullText.length} симв.`);
+            log(`[RX] УСПЕХ! Текст полностью восстановлен из AES-GCM: ${fullText.length} симв.`);
         }
 
         function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
